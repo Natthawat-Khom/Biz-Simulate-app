@@ -1,6 +1,6 @@
 import React from 'react';
 import { useGame } from '../../context/GameContext';
-import { Zap, Trophy, Play, Square, Award, RefreshCw, Flame } from 'lucide-react';
+import { Zap, Trophy, Play, Square, LogOut, CheckCircle2, Flame } from 'lucide-react';
 
 export default function MiningControlModal({ isOpen, onClose }) {
   const { room, users, startMiningEvent, stopMiningEvent } = useGame();
@@ -12,6 +12,17 @@ export default function MiningControlModal({ isOpen, onClose }) {
 
   // Sort students by tap count
   const sortedStudents = [...users].sort((a, b) => (b.miningTaps || 0) - (a.miningTaps || 0));
+
+  const handleExitMining = async () => {
+    if (isMining) {
+      try {
+        await stopMiningEvent();
+      } catch (err) {
+        console.error("Error stopping mining event:", err);
+      }
+    }
+    onClose();
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
@@ -30,10 +41,11 @@ export default function MiningControlModal({ isOpen, onClose }) {
           </div>
 
           <button
-            onClick={onClose}
-            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl text-xs font-semibold"
+            onClick={handleExitMining}
+            className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5"
           >
-            Close
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Close & Exit</span>
           </button>
         </div>
 
@@ -114,7 +126,7 @@ export default function MiningControlModal({ isOpen, onClose }) {
             <span>Live Tap Counters ({sortedStudents.length} Students)</span>
           </h3>
 
-          <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
             {sortedStudents.map((st) => {
               const taps = st.miningTaps || 0;
               const pct = Math.min(100, Math.round((taps / 50) * 100));
@@ -135,6 +147,17 @@ export default function MiningControlModal({ isOpen, onClose }) {
               );
             })}
           </div>
+        </div>
+
+        {/* Footer Exit & Return to Dashboard Button */}
+        <div className="border-t border-slate-800 pt-4">
+          <button
+            onClick={handleExitMining}
+            className="w-full py-3 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold rounded-xl text-xs flex items-center justify-center space-x-2 shadow-lg shadow-indigo-600/30 transition-all"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Close & Return to Dashboard (ปิดและกลับสู่หน้าหลัก)</span>
+          </button>
         </div>
 
       </div>

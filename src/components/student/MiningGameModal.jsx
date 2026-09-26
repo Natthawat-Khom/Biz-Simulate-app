@@ -2,17 +2,27 @@ import React, { useState, useEffect } from 'react';
 import { useGame } from '../../context/GameContext';
 import { useAuth } from '../../context/AuthContext';
 import confetti from 'canvas-confetti';
-import { Zap, Trophy, Flame, Sparkles, CheckCircle2 } from 'lucide-react';
+import { Zap, Trophy, Flame, Sparkles, CheckCircle2, LogOut } from 'lucide-react';
 
 export default function MiningGameModal() {
-  const { room, users, recordMiningTap } = useGame();
-  const { currentUser } = useAuth();
+  const { room, users, recordMiningTap } = useGame() || {};
+  const { currentUser } = useAuth() || {};
   const [particles, setParticles] = useState([]);
+  const [isDismissed, setIsDismissed] = useState(false);
 
   const isMining = room?.status === 'mining';
 
-  const studentId = String(currentUser?.stdId);
-  const myUserDoc = users.find(u => String(u.std_id || u.stdId) === studentId);
+  // Step 2: Auto-dismiss when room status changes from 'mining' back to 'active'
+  useEffect(() => {
+    if (room?.status !== 'mining') {
+      setIsDismissed(true);
+    } else {
+      setIsDismissed(false);
+    }
+  }, [room?.status]);
+
+  const studentId = String(currentUser?.stdId || '');
+  const myUserDoc = (users || []).find(u => String(u?.std_id || u?.stdId) === studentId);
   const taps = myUserDoc?.miningTaps || 0;
 
   const winners = room?.miningState?.winners || [];
@@ -29,7 +39,7 @@ export default function MiningGameModal() {
     }
   }, [myWin?.rank]);
 
-  if (!isMining) return null;
+  if (!isMining || isDismissed) return null;
 
   const handleTap = (e) => {
     if (taps >= 50 || myWin) return;
@@ -58,7 +68,7 @@ export default function MiningGameModal() {
           </div>
           <h2 className="text-2xl font-extrabold text-white">⚡ MINING SPEED RACE!</h2>
           <p className="text-xs text-slate-300">
-            Tap the button <strong>50 times</strong> as fast as you can! First 3 students win bonus tokens!
+            กดปุ่มให้ครบ <strong>50 ครั้ง</strong> ให้เร็วที่สุด! นักเรียน 3 คนแรกรับโบนัสทันที!
           </p>
         </div>
 
@@ -67,10 +77,10 @@ export default function MiningGameModal() {
           <div className="p-4 glass-card rounded-2xl border border-amber-500/50 bg-gradient-to-r from-amber-950/40 via-purple-950/40 to-slate-900 space-y-2">
             <div className="flex items-center justify-center space-x-2 text-amber-400 font-extrabold text-lg">
               <Trophy className="w-6 h-6" />
-              <span>YOU WON RANK #{myWin.rank}!</span>
+              <span>คุณชนะอันดับที่ #{myWin.rank}!</span>
             </div>
             <div className="text-xs text-slate-300">
-              Reward: <strong className="text-emerald-400 font-mono text-sm">+${myWin.reward} Bonus Tokens</strong> added to your Personal Wallet!
+              รางวัล: <strong className="text-emerald-400 font-mono text-sm">+${myWin.reward} โบนัส</strong> เติมเข้ากระเป๋าส่วนตัวของคุณเรียบร้อยแล้ว!
             </div>
           </div>
         ) : (
@@ -79,7 +89,7 @@ export default function MiningGameModal() {
             <div className="flex items-center justify-between text-xs font-semibold">
               <span className="text-slate-400 flex items-center space-x-1">
                 <Flame className="w-4 h-4 text-amber-500" />
-                <span>Tap Progress</span>
+                <span>จำนวนการกด</span>
               </span>
               <span className="font-mono text-base font-bold text-amber-300">
                 {taps} / 50
@@ -96,7 +106,7 @@ export default function MiningGameModal() {
         )}
 
         {/* Big Interactive Tap Button */}
-        <div className="py-4">
+        <div className="py-2">
           <button
             onClick={handleTap}
             disabled={taps >= 50 || Boolean(myWin)}
@@ -119,22 +129,22 @@ export default function MiningGameModal() {
             {myWin ? (
               <>
                 <CheckCircle2 className="w-12 h-12 text-emerald-400" />
-                <span className="text-sm">DONE!</span>
+                <span className="text-sm">สำเร็จ!</span>
               </>
             ) : (
               <>
                 <Sparkles className="w-10 h-10 animate-spin" />
-                <span className="text-2xl font-black">TAP HERE!</span>
+                <span className="text-2xl font-black">กดเลย!</span>
               </>
             )}
           </button>
         </div>
 
         {/* Winners Ticker */}
-        <div className="pt-2 text-xs text-slate-400 space-y-1">
-          <span className="font-semibold uppercase text-slate-500">Winners Leaderboard:</span>
+        <div className="pt-1 text-xs text-slate-400 space-y-1">
+          <span className="font-semibold uppercase text-slate-500">รายชื่อผู้ชนะ (Top 3):</span>
           {winners.length === 0 ? (
-            <p className="italic text-slate-500 text-[11px]">No winners yet. Be the first to reach 50!</p>
+            <p className="italic text-slate-500 text-[11px]">ยังไม่มีผู้ชนะ ร่วมแข่งกดให้ครบ 50 ครั้งคนแรก!</p>
           ) : (
             <div className="flex justify-center space-x-3">
               {winners.map(w => (
@@ -144,6 +154,17 @@ export default function MiningGameModal() {
               ))}
             </div>
           )}
+        </div>
+
+        {/* Fallback Return to Dashboard Button (Step 2 Requirement) */}
+        <div className="border-t border-slate-800 pt-3">
+          <button
+            onClick={() => setIsDismissed(true)}
+            className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-2"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>กลับสู่หน้าหลัก (Return to Dashboard)</span>
+          </button>
         </div>
 
       </div>
