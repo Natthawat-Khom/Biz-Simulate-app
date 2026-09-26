@@ -72,108 +72,109 @@ export default function StockMarketDashboard({ onOpenMiningModal, onOpenAuditMod
   return (
     <div className="h-[calc(100vh-80px)] overflow-hidden flex flex-col space-y-3 font-sans">
       
-      {/* 1. STATS & CONTROL BAR */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 shrink-0">
+      {/* 1. STATS & CONTROL BAR (4 EQUAL COLUMNS) */}
+      <div className="w-full grid grid-cols-1 md:grid-cols-4 gap-4 mb-4 shrink-0">
         
         {/* Metric 1: Total Ecosystem Capital Deployed */}
-        <div className="glass-panel p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
+        <div className="glass-panel p-4 rounded-2xl border border-slate-800 flex items-center justify-between col-span-1">
           <div>
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">
               Total Capital Deployed
             </span>
-            <span className="text-xl font-mono font-black text-emerald-400">
+            <span className="text-2xl font-mono font-black text-emerald-400 mt-1 block">
               ${totalEcosystemRaised.toLocaleString()}
             </span>
           </div>
-          <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400">
+          <div className="p-2.5 bg-emerald-500/10 rounded-xl text-emerald-400 border border-emerald-500/20">
             <DollarSign className="w-5 h-5" />
           </div>
         </div>
 
         {/* Metric 2: Soft Cap Goal Target */}
-        <div className="glass-panel p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
+        <div className="glass-panel p-4 rounded-2xl border border-slate-800 flex items-center justify-between col-span-1">
           <div>
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">
               Soft Cap Target Goal
             </span>
-            <span className="text-xl font-mono font-black text-amber-300">
+            <span className="text-2xl font-mono font-black text-amber-300 mt-1 block">
               ${softCapTarget.toLocaleString()}
             </span>
           </div>
-          <div className="p-2 bg-amber-500/10 rounded-xl text-amber-400">
+          <div className="p-2.5 bg-amber-500/10 rounded-xl text-amber-400 border border-amber-500/20">
             <Target className="w-5 h-5" />
           </div>
         </div>
 
-        {/* Metric 3: Funded Startups */}
-        <div className="glass-panel p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
+        {/* Metric 3: Funded Startups (Clean Metric Only) */}
+        <div className="glass-panel p-4 rounded-2xl border border-slate-800 flex items-center justify-between col-span-1">
           <div>
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">
               Funded Startups
             </span>
-            <span className="text-xl font-mono font-black text-indigo-400">
+            <span className="text-2xl font-mono font-black text-indigo-400 mt-1 block">
               {fundedCount} / {groups.length}
             </span>
           </div>
-          <div className="p-2 bg-indigo-500/10 rounded-xl text-indigo-400">
+          <div className="p-2.5 bg-indigo-500/10 rounded-xl text-indigo-400 border border-indigo-500/20">
             <CheckCircle2 className="w-5 h-5" />
           </div>
         </div>
 
-        {/* Action Buttons */}
-        <div className="glass-panel p-2.5 rounded-2xl border border-slate-800 flex items-center justify-end space-x-2">
-          {room?.status === 'setup' && (
+        {/* Action Panel (Column 4: Consolidated Action Buttons) */}
+        <div className="glass-panel p-3 rounded-2xl border border-slate-800 col-span-1 flex items-center justify-end">
+          <div className="flex flex-wrap items-center justify-end gap-2 w-full h-full">
+            {room?.status === 'setup' && (
+              <button
+                onClick={startRoomSession}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Start</span>
+              </button>
+            )}
+
             <button
-              onClick={startRoomSession}
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
+              onClick={onOpenMiningModal}
+              className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-extrabold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
             >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              <span>Start</span>
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>Mining</span>
             </button>
-          )}
 
-          <button
-            onClick={onOpenMiningModal}
-            className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-extrabold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
-          >
-            <Zap className="w-3.5 h-3.5 fill-current" />
-            <span>Mining</span>
-          </button>
+            <button
+              onClick={() => setIsTransactionAuditOpen(true)}
+              className="px-3 py-1.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
+            >
+              <ClipboardList className="w-3.5 h-3.5" />
+              <span>Audit Log</span>
+            </button>
 
-          {/* New Audit Log Modal Button */}
-          <button
-            onClick={() => setIsTransactionAuditOpen(true)}
-            className="px-3 py-1.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
-          >
-            <ClipboardList className="w-3.5 h-3.5" />
-            <span>Audit Log</span>
-          </button>
+            <button
+              onClick={onOpenAuditModal}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
+            >
+              <Users className="w-3.5 h-3.5" />
+              <span>Attendance</span>
+            </button>
 
-          <button
-            onClick={onOpenAuditModal}
-            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs flex items-center space-x-1 shadow-lg transition-all"
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>Attendance</span>
-          </button>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              title="Room Settings & Reset"
+              className="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
 
-          {/* Settings Button */}
-          <button
-            onClick={() => setIsSettingsOpen(true)}
-            title="Room Settings & Reset"
-            className="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition-all"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
-
-          <button
-            onClick={() => {
-              if (confirm("End pitching session and freeze leaderboard?")) endSession();
-            }}
-            className="px-2.5 py-1.5 bg-rose-950/60 border border-rose-500/40 text-rose-300 hover:bg-rose-600 hover:text-white rounded-xl text-xs font-bold transition-all"
-          >
-            <Lock className="w-3.5 h-3.5" />
-          </button>
+            <button
+              onClick={() => {
+                if (confirm("End pitching session and freeze leaderboard?")) endSession();
+              }}
+              title="End Pitching Session"
+              className="p-2 bg-rose-950/60 border border-rose-500/40 text-rose-300 hover:bg-rose-600 hover:text-white rounded-xl text-xs font-bold transition-all"
+            >
+              <Lock className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
       </div>
