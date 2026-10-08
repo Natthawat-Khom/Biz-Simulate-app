@@ -110,6 +110,12 @@ export function GameProvider({ children }) {
       snapshot.forEach(docSnap => {
         groupList.push({ id: docSnap.id, ...docSnap.data() });
       });
+      // Sort naturally by groupId (e.g. group_1, group_2, ... group_10)
+      groupList.sort((a, b) => {
+        const numA = parseInt(String(a.groupId || a.id).replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(String(b.groupId || b.id).replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+      });
       setGroups(groupList);
     });
 
@@ -710,22 +716,80 @@ export function GameProvider({ children }) {
     if (!roomId) return;
     try {
       const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
+      const targetNumGroups = Number(newSettings.numGroups);
+      const startingGroupBalance = Number(newSettings.startingGroupBalance);
+      const maxMembers = Number(newSettings.maxGroupMembers);
+
+      // 1. Fetch current groups in Firestore
+      const groupsSnap = await getDocs(collection(db, 'rooms', roomId, 'groups'));
+      const existingGroups = [];
+      groupsSnap.forEach(d => existingGroups.push({ id: d.id, ref: d.ref, ...d.data() }));
+
+      const batch = writeBatch(db);
+
+      // Update room settings doc
+      batch.update(roomRef, {
         'settings.softCapTarget': Number(newSettings.softCapTarget),
         'settings.startingPersonalBalance': Number(newSettings.startingPersonalBalance),
-        'settings.startingGroupBalance': Number(newSettings.startingGroupBalance),
-        'settings.maxGroupMembers': Number(newSettings.maxGroupMembers),
-        'settings.numGroups': Number(newSettings.numGroups),
+        'settings.startingGroupBalance': startingGroupBalance,
+        'settings.maxGroupMembers': maxMembers,
+        'settings.numGroups': targetNumGroups,
       });
-      showToast("Room settings updated dynamically!", 'success');
+
+      // 2. If targetNumGroups is specified and valid, synchronize groups collection
+      if (targetNumGroups && targetNumGroups >= 1) {
+        // Find highest existing group index
+        const existingIndices = existingGroups.map(g => {
+          const num = parseInt(String(g.groupId || g.id).replace(/\D/g, ''), 10);
+          return isNaN(num) ? 0 : num;
+        });
+        const maxExisting = existingIndices.length > 0 ? Math.max(...existingIndices) : 0;
+
+        // If increasing groups: create new group documents
+        if (targetNumGroups > maxExisting) {
+          for (let i = maxExisting + 1; i <= targetNumGroups; i++) {
+            const newGroupId = `group_${i}`;
+            const newGroupRef = doc(db, 'rooms', roomId, 'groups', newGroupId);
+            batch.set(newGroupRef, {
+              groupId: newGroupId,
+              name: `Group ${i}`,
+              leaderId: null,
+              groupBalance: startingGroupBalance,
+              treasuryCapital: startingGroupBalance,
+              raisedCapital: 0,
+              memberIds: []
+            });
+          }
+        } else if (targetNumGroups < existingGroups.length) {
+          // If decreasing groups: remove empty groups beyond targetNumGroups
+          // If a group has active members, we unassign those members or warn
+          for (const g of existingGroups) {
+            const num = parseInt(String(g.groupId || g.id).replace(/\D/g, ''), 10);
+            if (num > targetNumGroups) {
+              // Unassign any members in this group first
+              const members = g.memberIds || [];
+              for (const mId of members) {
+                const uRef = doc(db, 'rooms', roomId, 'users', String(mId));
+                batch.update(uRef, { groupId: null, isLeader: false });
+              }
+              // Delete the surplus group
+              batch.delete(g.ref);
+            }
+          }
+        }
+      }
+
+      await batch.commit();
+      showToast(`อัปเดตการตั้งค่าห้องเรียนเรียบร้อย! (กลุ่ม: ${targetNumGroups}, สมาชิกสูงสุด: ${maxMembers} คน/กลุ่ม)`, 'success');
     } catch (err) {
+      console.error("Update settings error:", err);
       showToast(`Failed to update settings: ${err.message}`, 'error');
       throw err;
     }
   };
 
   /**
-   * Teacher Resets Room Simulation (Deletes transactions, resets balances)
+   * Teacher Resets Room Simulation (Deletes transactions, resets balances, and removes students from all groups)
    */
   const resetRoomData = async () => {
     if (!roomId) return;
@@ -738,33 +802,193 @@ export function GameProvider({ children }) {
         batch.delete(docSnap.ref);
       });
 
-      // 2. Reset student balances
+      // 2. Reset student balances AND remove from groups
       const startingPersonal = Number(room?.settings?.startingPersonalBalance) || 1000;
       users.forEach((u) => {
         const uRef = doc(db, 'rooms', roomId, 'users', String(u.std_id || u.stdId));
         batch.update(uRef, {
           personalBalance: startingPersonal,
           initialPersonalBalance: startingPersonal,
+          groupId: null,
+          isLeader: false,
           miningTaps: 0
         });
       });
 
-      // 3. Reset group balances
+      // 3. Reset group balances AND empty memberIds & leader
       const startingGroup = Number(room?.settings?.startingGroupBalance) || 2000;
       groups.forEach((g) => {
         const gRef = doc(db, 'rooms', roomId, 'groups', g.groupId || g.id);
         batch.update(gRef, {
           groupBalance: startingGroup,
           treasuryCapital: startingGroup,
-          raisedCapital: 0
+          raisedCapital: 0,
+          memberIds: [],
+          leaderId: null
         });
       });
 
       await batch.commit();
-      showToast("Simulation Room reset successfully! All balances restarted.", 'success');
+      showToast("รีเซ็ตห้องเรียนสำเร็จ! ล้างข้อมูลธุรกรรม คืนยอดเงิน และนำนักศึกษาออกจากทุกกลุ่มเรียบร้อยแล้ว", 'success');
     } catch (err) {
       console.error("Reset room error:", err);
       showToast(`Failed to reset room: ${err.message}`, 'error');
+      throw err;
+    }
+  };
+
+  /**
+   * Teacher moves student to another group (or unassigned if targetGroupId is empty/null)
+   */
+  const moveStudentToGroup = async (studentId, targetGroupId) => {
+    if (!roomId) return;
+    if (currentUser?.role !== 'teacher') {
+      showToast("เฉพาะอาจารย์เท่านั้นที่มีสิทธิ์ย้ายกลุ่มนักศึกษา!", 'error');
+      return;
+    }
+
+    try {
+      const stdIdStr = String(studentId);
+      const userRef = doc(db, 'rooms', roomId, 'users', stdIdStr);
+
+      await runTransaction(db, async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists()) throw new Error("ไม่พบข้อมูลนักศึกษา");
+
+        const userData = userDoc.data();
+        const currentGroupId = userData.groupId;
+
+        if (currentGroupId === targetGroupId) return;
+
+        // If currently in a group, remove from old group
+        if (currentGroupId) {
+          const oldGroupRef = doc(db, 'rooms', roomId, 'groups', currentGroupId);
+          const oldGroupDoc = await transaction.get(oldGroupRef);
+          if (oldGroupDoc.exists()) {
+            const oldData = oldGroupDoc.data();
+            const updatedMembers = (oldData.memberIds || []).filter(id => String(id) !== stdIdStr);
+            let updatedLeaderId = oldData.leaderId;
+
+            // If user was leader, assign new leader if anyone left
+            if (String(oldData.leaderId) === stdIdStr) {
+              updatedLeaderId = updatedMembers.length > 0 ? updatedMembers[0] : null;
+              if (updatedLeaderId) {
+                const newLeaderUserRef = doc(db, 'rooms', roomId, 'users', String(updatedLeaderId));
+                transaction.update(newLeaderUserRef, { isLeader: true });
+              }
+            }
+
+            transaction.update(oldGroupRef, {
+              memberIds: updatedMembers,
+              leaderId: updatedLeaderId
+            });
+          }
+        }
+
+        // If targetGroupId provided, add to new group
+        if (targetGroupId) {
+          const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
+          const targetGroupDoc = await transaction.get(targetGroupRef);
+          if (!targetGroupDoc.exists()) throw new Error("ไม่พบข้อมูลกลุ่มเป้าหมาย");
+
+          const targetData = targetGroupDoc.data();
+          const targetMembers = targetData.memberIds || [];
+          const maxMembers = room?.settings?.maxGroupMembers || 5;
+
+          if (targetMembers.length >= maxMembers) {
+            throw new Error(`กลุ่มนี้มีสมาชิกเต็มแล้ว (${maxMembers} คน)`);
+          }
+
+          const isFirstMember = targetMembers.length === 0;
+          const newTargetMembers = [...targetMembers.filter(id => String(id) !== stdIdStr), stdIdStr];
+          const targetLeaderId = isFirstMember ? stdIdStr : (targetData.leaderId || stdIdStr);
+
+          transaction.update(targetGroupRef, {
+            memberIds: newTargetMembers,
+            leaderId: targetLeaderId
+          });
+
+          transaction.update(userRef, {
+            groupId: targetGroupId,
+            isLeader: isFirstMember
+          });
+        } else {
+          // Unassigned
+          transaction.update(userRef, {
+            groupId: null,
+            isLeader: false
+          });
+        }
+      });
+
+      showToast(`ย้ายกลุ่มนักศึกษาสำเร็จ!`, 'success');
+    } catch (err) {
+      console.error("Move student error:", err);
+      showToast(`ย้ายกลุ่มไม่สำเร็จ: ${err.message}`, 'error');
+      throw err;
+    }
+  };
+
+  /**
+   * Teacher removes student from current group (Unassigns to no group)
+   */
+  const removeStudentFromGroup = async (studentId) => {
+    return moveStudentToGroup(studentId, null);
+  };
+
+  /**
+   * Teacher deletes student completely from the room simulation
+   */
+  const deleteStudentFromRoom = async (studentId) => {
+    if (!roomId) return;
+    if (currentUser?.role !== 'teacher') {
+      showToast("เฉพาะอาจารย์เท่านั้นที่มีสิทธิ์ลบนักศึกษาออกจากห้อง!", 'error');
+      return;
+    }
+
+    try {
+      const stdIdStr = String(studentId);
+      const userRef = doc(db, 'rooms', roomId, 'users', stdIdStr);
+
+      await runTransaction(db, async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists()) return;
+
+        const userData = userDoc.data();
+        const currentGroupId = userData.groupId;
+
+        // If student belongs to a group, remove from group roster
+        if (currentGroupId) {
+          const groupRef = doc(db, 'rooms', roomId, 'groups', currentGroupId);
+          const groupDoc = await transaction.get(groupRef);
+          if (groupDoc.exists()) {
+            const groupData = groupDoc.data();
+            const updatedMembers = (groupData.memberIds || []).filter(id => String(id) !== stdIdStr);
+            let updatedLeaderId = groupData.leaderId;
+
+            if (String(groupData.leaderId) === stdIdStr) {
+              updatedLeaderId = updatedMembers.length > 0 ? updatedMembers[0] : null;
+              if (updatedLeaderId) {
+                const newLeaderUserRef = doc(db, 'rooms', roomId, 'users', String(updatedLeaderId));
+                transaction.update(newLeaderUserRef, { isLeader: true });
+              }
+            }
+
+            transaction.update(groupRef, {
+              memberIds: updatedMembers,
+              leaderId: updatedLeaderId
+            });
+          }
+        }
+
+        // Delete user document
+        transaction.delete(userRef);
+      });
+
+      showToast(`ลบนักศึกษา (${studentId}) ออกจากห้องเรียนสำเร็จ!`, 'success');
+    } catch (err) {
+      console.error("Delete student error:", err);
+      showToast(`ลบนักศึกษาไม่สำเร็จ: ${err.message}`, 'error');
       throw err;
     }
   };
@@ -873,6 +1097,9 @@ export function GameProvider({ children }) {
         updateRoomSettings,
         resetRoomData,
         revokeInvestment,
+        moveStudentToGroup,
+        removeStudentFromGroup,
+        deleteStudentFromRoom,
       }}
     >
       {children}

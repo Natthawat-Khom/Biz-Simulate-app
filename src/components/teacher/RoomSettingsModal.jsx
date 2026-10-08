@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useGame } from '../../context/GameContext';
 import { X, Settings, RefreshCw, AlertTriangle, Target, DollarSign, Users, Hash, Check } from 'lucide-react';
 
@@ -7,13 +7,24 @@ export default function RoomSettingsModal({ isOpen, onClose }) {
 
   const currentSettings = room?.settings || {};
 
-  const [softCapTarget, setSoftCapTarget] = useState(currentSettings.softCapTarget || 5000);
-  const [startingPersonalBalance, setStartingPersonalBalance] = useState(currentSettings.startingPersonalBalance || 1000);
-  const [startingGroupBalance, setStartingGroupBalance] = useState(currentSettings.startingGroupBalance || 2000);
-  const [maxGroupMembers, setMaxGroupMembers] = useState(currentSettings.maxGroupMembers || 5);
-  const [numGroups, setNumGroups] = useState(currentSettings.numGroups || 4);
+  const [softCapTarget, setSoftCapTarget] = useState(5000);
+  const [startingPersonalBalance, setStartingPersonalBalance] = useState(1000);
+  const [startingGroupBalance, setStartingGroupBalance] = useState(2000);
+  const [maxGroupMembers, setMaxGroupMembers] = useState(5);
+  const [numGroups, setNumGroups] = useState(4);
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
+
+  // Sync state whenever modal is opened or room settings change
+  useEffect(() => {
+    if (isOpen && room?.settings) {
+      setSoftCapTarget(room.settings.softCapTarget ?? 5000);
+      setStartingPersonalBalance(room.settings.startingPersonalBalance ?? 1000);
+      setStartingGroupBalance(room.settings.startingGroupBalance ?? 2000);
+      setMaxGroupMembers(room.settings.maxGroupMembers ?? 5);
+      setNumGroups(room.settings.numGroups ?? 4);
+    }
+  }, [isOpen, room?.settings]);
 
   if (!isOpen) return null;
 
@@ -37,7 +48,7 @@ export default function RoomSettingsModal({ isOpen, onClose }) {
   };
 
   const handleResetRoom = async () => {
-    const confirmMessage = "🚨 CRITICAL WARNING!\n\nAre you sure you want to RESET this simulation room?\n\nThis will:\n1. Delete ALL transactions & chart history.\n2. Reset all startup raised capital to $0.\n3. Refund all student balances to initial starting values.\n\nStudents will NOT be kicked out of their groups.";
+    const confirmMessage = "🚨 คำเตือนสำคัญ (CRITICAL RESET)!\n\nคุณแน่ใจหรือไม่ว่าต้องการรีเซ็ตห้องจำลองนี้?\n\nการดำเนินการนี้จะ:\n1. ลบประวัติและรายการธุรกรรมทั้งหมด\n2. รีเซ็ตเงินระดมทุนของสตาร์ทอัพเป็น $0\n3. คืนเงินส่วนตัวและเงินคลังกลุ่มเป็นค่าเริ่มต้น\n4. นำนักศึกษาออกจากกลุ่มทั้งหมด (ให้เลือกกลุ่มใหม่)";
     
     if (!window.confirm(confirmMessage)) return;
 
@@ -139,11 +150,16 @@ export default function RoomSettingsModal({ isOpen, onClose }) {
                 onChange={(e) => setMaxGroupMembers(Number(e.target.value))}
                 className="w-full px-4 py-2.5 bg-slate-900/80 border border-slate-700 text-white rounded-xl text-sm outline-none"
               >
+                <option value={1}>1 Member / Group</option>
                 <option value={2}>2 Members / Group</option>
                 <option value={3}>3 Members / Group</option>
                 <option value={4}>4 Members / Group</option>
                 <option value={5}>5 Members / Group</option>
                 <option value={6}>6 Members / Group</option>
+                <option value={7}>7 Members / Group</option>
+                <option value={8}>8 Members / Group</option>
+                <option value={9}>9 Members / Group</option>
+                <option value={10}>10 Members / Group</option>
               </select>
             </div>
 

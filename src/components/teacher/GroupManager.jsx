@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { useGame } from '../../context/GameContext';
-import { Users, Crown, ShieldAlert, Check, ArrowRightLeft } from 'lucide-react';
+import { Users, Crown, ShieldAlert, Check, ArrowRightLeft, UserMinus, LogOut } from 'lucide-react';
 
 export default function GroupManager() {
-  const { groups, users, overrideGroupLeader, room } = useGame();
+  const { groups, users, overrideGroupLeader, moveStudentToGroup, removeStudentFromGroup, room } = useGame();
   const [editingGroupId, setEditingGroupId] = useState(null);
   const [selectedLeaderId, setSelectedLeaderId] = useState('');
+  const [movingStudentId, setMovingStudentId] = useState(null);
 
   const maxMembers = room?.settings?.maxGroupMembers || 5;
 
@@ -18,6 +19,17 @@ export default function GroupManager() {
     if (!selectedLeaderId) return;
     await overrideGroupLeader(groupId, selectedLeaderId);
     setEditingGroupId(null);
+  };
+
+  const handleRemoveMember = async (studentId, studentName) => {
+    if (!window.confirm(`นำ "${studentName}" ออกจากกลุ่มนี้หรือไม่?`)) return;
+    await removeStudentFromGroup(studentId);
+  };
+
+  const handleMoveMember = async (studentId, targetGroupId) => {
+    if (!targetGroupId) return;
+    await moveStudentToGroup(studentId, targetGroupId);
+    setMovingStudentId(null);
   };
 
   return (
@@ -36,15 +48,16 @@ export default function GroupManager() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {groups.map((group) => {
-          const groupMembers = users.filter(u => u.groupId === group.groupId || u.groupId === group.id);
+          const currentGroupId = group.groupId || group.id;
+          const groupMembers = users.filter(u => u.groupId === currentGroupId);
           const currentLeader = groupMembers.find(u => String(u.std_id || u.stdId) === String(group.leaderId)) || 
                                 groupMembers.find(u => u.isLeader);
 
-          const isEditing = editingGroupId === group.groupId;
+          const isEditing = editingGroupId === currentGroupId;
 
           return (
             <div
-              key={group.groupId || group.id}
+              key={currentGroupId}
               className="glass-panel p-5 rounded-2xl border border-slate-800 hover:border-slate-700/80 transition-all space-y-4"
             >
               {/* Group Header */}
@@ -97,7 +110,7 @@ export default function GroupManager() {
                       Cancel
                     </button>
                     <button
-                      onClick={() => handleSaveLeader(group.groupId)}
+                      onClick={() => handleSaveLeader(currentGroupId)}
                       disabled={!selectedLeaderId}
                       className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-lg transition-colors flex items-center space-x-1"
                     >
@@ -125,22 +138,71 @@ export default function GroupManager() {
                 {groupMembers.length === 0 ? (
                   <p className="text-xs text-slate-500 italic py-1">No students have joined this group yet.</p>
                 ) : (
-                  <div className="space-y-1 max-h-32 overflow-y-auto pr-1">
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                     {groupMembers.map(m => {
+                      const studentId = String(m.std_id || m.stdId);
                       const isL = String(m.std_id || m.stdId) === String(group.leaderId) || m.isLeader;
+                      const isMovingThis = movingStudentId === studentId;
+
                       return (
                         <div
-                          key={m.std_id || m.stdId}
-                          className="flex items-center justify-between text-xs px-2.5 py-1.5 bg-slate-900/40 rounded-lg text-slate-300"
+                          key={studentId}
+                          className="p-2 bg-slate-900/60 rounded-xl border border-slate-800/80 space-y-1.5"
                         >
-                          <div className="flex items-center space-x-2 truncate">
-                            <span className="font-mono text-slate-400 text-[11px]">{m.std_id || m.stdId}</span>
-                            <span className="truncate">{m.fullname}</span>
+                          <div className="flex items-center justify-between text-xs text-slate-300">
+                            <div className="flex items-center space-x-2 truncate">
+                              <span className="font-mono text-slate-400 text-[11px]">{studentId}</span>
+                              <span className="truncate font-medium">{m.fullname}</span>
+                              {isL && (
+                                <span className="text-[9px] font-bold text-amber-400 bg-amber-500/10 px-1 py-0.2 rounded border border-amber-500/30">
+                                  LEADER
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center space-x-1 shrink-0">
+                              <button
+                                onClick={() => setMovingStudentId(isMovingThis ? null : studentId)}
+                                title="ย้ายไปกลุ่มอื่น"
+                                className="px-1.5 py-0.5 rounded bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] transition-colors"
+                              >
+                                ย้ายกลุ่ม
+                              </button>
+                              <button
+                                onClick={() => handleRemoveMember(studentId, m.fullname)}
+                                title="นำออกจากกลุ่ม"
+                                className="p-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[10px] transition-colors"
+                              >
+                                <UserMinus className="w-3 h-3" />
+                              </button>
+                            </div>
                           </div>
-                          {isL && (
-                            <span className="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30">
-                              LEADER
-                            </span>
+
+                          {/* Quick move dropdown inline */}
+                          {isMovingThis && (
+                            <div className="flex items-center space-x-1.5 pt-1 border-t border-slate-800">
+                              <span className="text-[10px] text-slate-400">ย้ายไป:</span>
+                              <select
+                                defaultValue=""
+                                onChange={(e) => handleMoveMember(studentId, e.target.value)}
+                                className="flex-1 px-2 py-0.5 bg-slate-950 border border-slate-700 rounded text-[11px] text-white outline-none"
+                              >
+                                <option value="" disabled>-- เลือกกลุ่มเป้าหมาย --</option>
+                                {groups
+                                  .filter(g => (g.groupId || g.id) !== currentGroupId)
+                                  .map(g => (
+                                    <option key={g.groupId || g.id} value={g.groupId || g.id}>
+                                      {g.name} ({(g.memberIds || []).length}/{maxMembers})
+                                    </option>
+                                  ))}
+                              </select>
+                              <button
+                                onClick={() => setMovingStudentId(null)}
+                                className="px-1.5 py-0.5 bg-slate-800 text-slate-400 text-[10px] rounded hover:text-white"
+                              >
+                                ปิด
+                              </button>
+                            </div>
                           )}
                         </div>
                       );
