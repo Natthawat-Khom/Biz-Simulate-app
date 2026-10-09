@@ -793,18 +793,16 @@ export function GameProvider({ children }) {
       });
       opCount++;
 
-      // 3. Update all existing student member balances
-      const hasTransactions = transactions && transactions.length > 0;
+      // 3. Update all existing student member balances directly & reliably
       for (const u of existingUsers) {
         if (u.role !== 'teacher') {
-          let newPersonalBal;
-          if (!hasTransactions) {
-            newPersonalBal = newStartingPersonalBalance;
-          } else {
-            newPersonalBal = Math.max(0, (Number(u.personalBalance) || 0) + diffPersonal);
-          }
+          const currentBal = Number(u.personalBalance ?? oldStartingPersonal);
+          const initialBal = Number(u.initialPersonalBalance ?? oldStartingPersonal);
+          const spent = Math.max(0, initialBal - currentBal);
+          const newPersonalBal = Math.max(0, newStartingPersonalBalance - spent);
 
-          currentBatch.update(u.ref, {
+          const studentDocRef = doc(db, 'rooms', roomId, 'users', String(u.std_id || u.stdId || u.id));
+          currentBatch.update(studentDocRef, {
             personalBalance: newPersonalBal,
             initialPersonalBalance: newStartingPersonalBalance
           });
@@ -813,22 +811,14 @@ export function GameProvider({ children }) {
         }
       }
 
-      // 4. Update all existing startup groups treasury and total balance
+      // 4. Update all existing startup groups treasury and total balance directly & reliably
       for (const g of existingGroups) {
-        let newTreasury;
-        const currentTreasury = Number(g.treasuryCapital ?? g.groupBalance ?? oldStartingGroup);
         const currentRaised = Number(g.raisedCapital || 0);
+        const groupDocRef = doc(db, 'rooms', roomId, 'groups', String(g.groupId || g.id));
 
-        if (!hasTransactions) {
-          newTreasury = newStartingGroupBalance;
-        } else {
-          newTreasury = Math.max(0, currentTreasury + diffGroup);
-        }
-        const newGroupBal = newTreasury + currentRaised;
-
-        currentBatch.update(g.ref, {
-          treasuryCapital: newTreasury,
-          groupBalance: newGroupBal
+        currentBatch.update(groupDocRef, {
+          treasuryCapital: newStartingGroupBalance,
+          groupBalance: newStartingGroupBalance + currentRaised
         });
         opCount++;
         await commitIfFull();
@@ -887,6 +877,31 @@ export function GameProvider({ children }) {
     } catch (err) {
       console.error("Update settings error:", err);
       handleFirebaseError(err, `Failed to update settings: ${err.message}`);
+      throw err;
+    }
+  };
+
+  /**
+   * Teacher explicitly synchronizes all students and groups to current room settings
+   */
+  const syncAllBalancesToSettings = async () => {
+    if (!roomId) return;
+    try {
+      const targetPersonal = Number(room?.settings?.startingPersonalBalance) || 1000;
+      const targetGroup = Number(room?.settings?.startingGroupBalance) || 2000;
+
+      await updateRoomSettings({
+        softCapTarget: Number(room?.settings?.softCapTarget) || 5000,
+        startingPersonalBalance: targetPersonal,
+        startingGroupBalance: targetGroup,
+        maxGroupMembers: Number(room?.settings?.maxGroupMembers) || 5,
+        numGroups: Number(room?.settings?.numGroups) || 4,
+      });
+
+      showToast(`ซิงค์ยอดเงินสำเร็จ! นักเรียนทุกคนเป็น $${targetPersonal} และเงินคลังกลุ่มเป็น $${targetGroup} เรียบร้อยแล้ว`, 'success');
+    } catch (err) {
+      console.error("Sync balances error:", err);
+      handleFirebaseError(err, `Failed to sync balances: ${err.message}`);
       throw err;
     }
   };
@@ -1203,6 +1218,7 @@ export function GameProvider({ children }) {
         moveStudentToGroup,
         removeStudentFromGroup,
         deleteStudentFromRoom,
+        syncAllBalancesToSettings,
       }}
     >
       {children}

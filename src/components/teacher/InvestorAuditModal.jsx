@@ -1,16 +1,28 @@
 import React, { useState } from 'react';
 import { useGame } from '../../context/GameContext';
-import { X, Users, ShieldAlert, CheckCircle2, AlertTriangle, Circle, DollarSign, UserMinus, Trash2, ArrowRightLeft } from 'lucide-react';
+import { X, Users, ShieldAlert, CheckCircle2, AlertTriangle, Circle, DollarSign, UserMinus, Trash2, ArrowRightLeft, RefreshCw } from 'lucide-react';
 
 export default function InvestorAuditModal({ isOpen, onClose }) {
-  const { users, groups, room, moveStudentToGroup, removeStudentFromGroup, deleteStudentFromRoom } = useGame();
+  const { users, groups, room, moveStudentToGroup, removeStudentFromGroup, deleteStudentFromRoom, syncAllBalancesToSettings } = useGame();
   const [filter, setFilter] = useState('all'); // 'all' | 'hoarders' | 'online'
   const [actionLoading, setActionLoading] = useState({});
+  const [syncing, setSyncing] = useState(false);
 
   if (!isOpen) return null;
 
   const initialCap = room?.settings?.startingPersonalBalance || 1000;
+  const initialGroupCap = room?.settings?.startingGroupBalance || 2000;
   const now = Date.now();
+
+  const handleSyncBalances = async () => {
+    if (!window.confirm(`คุณต้องการปรับยอดเงินของนักเรียนทุกคนให้เป็น $${initialCap} และคลังกลุ่มเป็น $${initialGroupCap} ตามการตั้งค่าห้องเรียนหรือไม่?`)) return;
+    setSyncing(true);
+    try {
+      await syncAllBalancesToSettings();
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleMoveGroup = async (studentId, targetGroupId) => {
     setActionLoading(prev => ({ ...prev, [studentId]: true }));
@@ -94,6 +106,30 @@ export default function InvestorAuditModal({ isOpen, onClose }) {
             className="p-2 text-slate-400 hover:text-white rounded-xl bg-slate-900/60 hover:bg-slate-800 transition-colors"
           >
             <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Quick Sync Balance Bar */}
+        <div className="flex flex-col sm:flex-row items-center justify-between p-4 bg-gradient-to-r from-emerald-950/50 via-slate-900 to-indigo-950/40 border border-emerald-500/30 rounded-2xl gap-3 shadow-lg">
+          <div className="text-xs text-slate-300 flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-emerald-400 flex items-center gap-1">
+              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+              <span>ค่าเงินเริ่มต้นของห้อง:</span>
+            </span>
+            <span className="px-2 py-0.5 bg-slate-800 rounded-lg border border-slate-700">
+              นักเรียน: <strong className="text-emerald-300 font-mono font-bold">${initialCap}</strong>
+            </span>
+            <span className="px-2 py-0.5 bg-slate-800 rounded-lg border border-slate-700">
+              คลังกลุ่ม: <strong className="text-emerald-300 font-mono font-bold">${initialGroupCap}</strong>
+            </span>
+          </div>
+          <button
+            onClick={handleSyncBalances}
+            disabled={syncing}
+            className="w-full sm:w-auto px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center justify-center space-x-2 shadow-lg shadow-emerald-600/30 transition-all shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+            <span>{syncing ? 'กำลังปรับยอดเงิน...' : `⚡ อัปเดตเงินนักเรียนทุกคนให้เป็น $${initialCap}`}</span>
           </button>
         </div>
 
