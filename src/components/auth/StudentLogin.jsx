@@ -54,7 +54,11 @@ export default function StudentLogin() {
       loginAsStudent(userData, roomCode);
     } catch (err) {
       console.error("Login error:", err);
-      setError(`Login failed: ${err.message}`);
+      if (err?.code === 'resource-exhausted' || err?.message?.toLowerCase().includes('quota exceeded')) {
+        setError("โควตา Firebase ประจำวันเต็ม (Quota exceeded) หากต้องการใช้งานต่อทันทีโปรดอัปเกรดเป็น Blaze Plan ใน Firebase Console หรือรอระบบรีเซ็ตโควตารายวัน");
+      } else {
+        setError(`Login failed: ${err.message}`);
+      }
     } finally {
       setLoading(false);
     }

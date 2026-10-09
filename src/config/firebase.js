@@ -1,5 +1,10 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { 
+  getFirestore, 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager 
+} from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import { getAnalytics, isSupported } from 'firebase/analytics';
 
@@ -19,8 +24,19 @@ export const isFirebaseConfigured = true;
 // Initialize Firebase App
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Initialize Firestore & Auth
-export const db = getFirestore(app);
+// Initialize Firestore with IndexedDB persistent local cache
+
+let firestoreDb;
+try {
+  firestoreDb = initializeFirestore(app, {
+    localCache: persistentLocalCache({
+      tabManager: persistentMultipleTabManager()
+    })
+  });
+} catch (e) {
+  firestoreDb = getFirestore(app);
+}
+export const db = firestoreDb;
 export const auth = getAuth(app);
 
 // Initialize Analytics if supported in browser environment

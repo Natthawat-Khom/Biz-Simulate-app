@@ -47,9 +47,9 @@ export default function InvestorAuditModal({ isOpen, onClose }) {
     const deployed = Math.max(0, initial - bal);
     const deployedPct = Math.min(100, Math.round((deployed / initial) * 100));
     
-    // Heartbeat online check (within last 90 seconds = Online)
+    // Session active check (connected within current session / last 2 hours)
     const lastActiveMs = u.lastActive?.seconds ? u.lastActive.seconds * 1000 : 0;
-    const isOnline = lastActiveMs > 0 && (now - lastActiveMs) < 90000;
+    const isOnline = lastActiveMs > 0 && (now - lastActiveMs) < 7200000;
 
     const groupObj = groups.find(g => (g.groupId || g.id) === u.groupId);
 

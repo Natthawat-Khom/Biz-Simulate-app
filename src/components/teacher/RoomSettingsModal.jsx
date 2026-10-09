@@ -121,6 +121,7 @@ export default function RoomSettingsModal({ isOpen, onClose }) {
                 className="w-full px-4 py-2.5 bg-slate-900/80 border border-slate-700 font-mono text-white rounded-xl text-sm outline-none"
                 required
               />
+              <p className="text-[11px] text-emerald-400/80">✨ อัปเดตเงินคลังไปยังทุกกลุ่มทันทีที่บันทึก</p>
             </div>
 
             {/* Starting Student Capital */}
@@ -137,6 +138,7 @@ export default function RoomSettingsModal({ isOpen, onClose }) {
                 className="w-full px-4 py-2.5 bg-slate-900/80 border border-slate-700 font-mono text-white rounded-xl text-sm outline-none"
                 required
               />
+              <p className="text-[11px] text-emerald-400/80">✨ อัปเดตยอดเงินไปยังนักเรียนทุกคนทันทีที่บันทึก</p>
             </div>
 
             {/* Max Group Members */}

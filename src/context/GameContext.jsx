@@ -34,25 +34,28 @@ export function GameProvider({ children }) {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // --- 1. HEARTBEAT PRESENCE UPDATER (ONLINE / OFFLINE STATUS) ---
+  // Centralized Firebase Error Handler
+  const handleFirebaseError = (err, fallbackMsg) => {
+    console.error("Firebase operation notice:", err);
+    if (err?.code === 'resource-exhausted' || err?.message?.toLowerCase().includes('quota exceeded')) {
+      showToast("โควตา Firebase รายวันเต็ม (Quota exceeded) หากต้องการใช้งานต่อทันทีโปรดอัปเกรดเป็น Blaze Plan ใน Firebase Console หรือรอรีเซ็ต", 'error');
+    } else {
+      showToast(fallbackMsg || err.message, 'error');
+    }
+  };
+
+  // --- 1. SINGLE PRESENCE UPDATE (ON ROOM ENTRY ONLY) ---
+  // Avoid repeated interval polling to protect Firestore daily read/write quota
   useEffect(() => {
     if (!roomId || !currentUser?.stdId || currentUser?.role === 'teacher') return;
 
     const studentId = String(currentUser.stdId);
     const userRef = doc(db, 'rooms', roomId, 'users', studentId);
 
-    const updatePresence = async () => {
-      try {
-        await updateDoc(userRef, { lastActive: serverTimestamp() });
-      } catch (err) {
-        // Ignore heartbeat errors on network drop
-      }
-    };
-
-    updatePresence();
-    const interval = setInterval(updatePresence, 30000); // 30 seconds interval
-
-    return () => clearInterval(interval);
+    // Update presence once when mounting/entering room
+    updateDoc(userRef, { lastActive: serverTimestamp() }).catch(() => {
+      // Ignore initial presence error
+    });
   }, [roomId, currentUser?.stdId, currentUser?.role]);
 
   // --- 2. REAL-TIME FIRESTORE LISTENERS ---
@@ -169,6 +172,7 @@ export function GameProvider({ children }) {
 
       // 2. Auto-generate Groups
       const numGroups = Number(settings.numGroups) || 4;
+      const initialGroupBal = Number(settings.startingGroupBalance) || 2000;
       for (let i = 1; i <= numGroups; i++) {
         const groupId = `group_${i}`;
         const groupRef = doc(db, 'rooms', newRoomId, 'groups', groupId);
@@ -176,7 +180,9 @@ export function GameProvider({ children }) {
           groupId,
           name: `Group ${i}`,
           leaderId: null,
-          groupBalance: Number(settings.startingGroupBalance) || 2000,
+          groupBalance: initialGroupBal,
+          treasuryCapital: initialGroupBal,
+          raisedCapital: 0,
           memberIds: []
         });
       }
@@ -233,27 +239,50 @@ export function GameProvider({ children }) {
       const userRef = doc(db, 'rooms', roomId, 'users', studentId);
 
       await runTransaction(db, async (transaction) => {
+        const userDoc = await transaction.get(userRef);
         const groupDoc = await transaction.get(groupRef);
         if (!groupDoc.exists()) throw new Error("Group does not exist!");
 
         const groupData = groupDoc.data();
         const maxMembers = room?.settings?.maxGroupMembers || 5;
+        const currentMembers = groupData.memberIds || [];
 
-        if (groupData.memberIds.length >= maxMembers) {
+        if (currentMembers.length >= maxMembers) {
           throw new Error(`Group is full! Maximum ${maxMembers} members allowed.`);
         }
 
-        if (groupData.memberIds.includes(studentId)) {
+        if (currentMembers.includes(studentId)) {
           throw new Error("You are already in this group!");
         }
 
+        const prevGroupId = userDoc.exists() ? userDoc.data().groupId : null;
+        let prevGroupDoc = null;
+        if (prevGroupId && prevGroupId !== targetGroupId) {
+          const prevGroupRef = doc(db, 'rooms', roomId, 'groups', prevGroupId);
+          prevGroupDoc = await transaction.get(prevGroupRef);
+        }
+
+        // Clean up old group if student switched
+        if (prevGroupDoc && prevGroupDoc.exists()) {
+          const prevData = prevGroupDoc.data();
+          const updatedPrevMembers = (prevData.memberIds || []).filter(id => String(id) !== studentId);
+          const prevLeaderId = String(prevData.leaderId) === studentId
+            ? (updatedPrevMembers.length > 0 ? updatedPrevMembers[0] : null)
+            : prevData.leaderId;
+
+          transaction.update(prevGroupDoc.ref, {
+            memberIds: updatedPrevMembers,
+            leaderId: prevLeaderId
+          });
+        }
+
         // Determine if student is the first to join -> becomes Leader (CEO)
-        const isFirst = groupData.memberIds.length === 0;
+        const isFirst = currentMembers.length === 0;
         const newLeaderId = isFirst ? studentId : (groupData.leaderId || null);
 
         // Update Group document
         transaction.update(groupRef, {
-          memberIds: [...groupData.memberIds, studentId],
+          memberIds: [...currentMembers, studentId],
           leaderId: newLeaderId
         });
 
@@ -267,7 +296,7 @@ export function GameProvider({ children }) {
 
       showToast(`Joined ${targetGroupId.replace('group_', 'Group ')} successfully!`, 'success');
     } catch (err) {
-      showToast(err.message, 'error');
+      handleFirebaseError(err);
     }
   };
 
@@ -336,120 +365,48 @@ export function GameProvider({ children }) {
     const targetGroupObj = groups.find(g => g.id === targetGroupId || g.groupId === targetGroupId);
     const targetGroupName = targetGroupObj?.name || targetGroupId;
 
-    if (senderType === 'personal') {
-      // --- PERSONAL CAPITAL INVESTMENT ---
-      const senderUserRef = doc(db, 'rooms', roomId, 'users', studentId);
-
-      await runTransaction(db, async (transaction) => {
-        const userDoc = await transaction.get(senderUserRef);
-        if (!userDoc.exists()) throw new Error("Sender user document not found.");
-
-        const currentBal = Number(userDoc.data().personalBalance || 0);
-        const initialCap = Number(userDoc.data().initialPersonalBalance) || Number(room?.settings?.startingPersonalBalance) || 1000;
-
-        // STRICT RULE 2: Portfolio Diversification (Max 70% into a single startup)
-        const maxSingleLimit = Math.floor(initialCap * 0.7);
-        if (numAmount > maxSingleLimit) {
-          throw new Error(`PORTFOLIO DIVERSIFICATION RULE: A single investment cannot exceed 70% ($${maxSingleLimit}) of your total capital ($${initialCap})! You must diversify across at least 2 startups.`);
-        }
-
-        if (currentBal < numAmount) {
-          throw new Error(`Insufficient personal capital! Current balance is $${currentBal}.`);
-        }
-
-        const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
-        const targetDoc = await transaction.get(targetGroupRef);
-        if (!targetDoc.exists()) throw new Error("Target startup group not found.");
-
-        const targetBal = Number(targetDoc.data().groupBalance || 0);
-        const targetRaised = Number(targetDoc.data().raisedCapital || 0);
-
-        // Deduct from Personal Capital, Credit to Target Group Raised Capital
-        transaction.update(senderUserRef, { personalBalance: currentBal - numAmount, lastActive: serverTimestamp() });
-        transaction.update(targetGroupRef, { 
-          groupBalance: targetBal + numAmount,
-          raisedCapital: targetRaised + numAmount
-        });
-
-        // Record Completed Transaction
-        const newTxRef = doc(txCollectionRef);
-        transaction.set(newTxRef, {
-          senderType: 'personal',
-          senderId: studentId,
-          senderName: myUser?.fullname || studentId,
-          senderGroupId: myGroupId,
-          receiverGroupId: targetGroupId,
-          receiverGroupName: targetGroupName,
-          amount: numAmount,
-          status: 'completed',
-          signatures: [studentId],
-          requiredSignatures: 1,
-          type: 'investment',
-          note: note || `Angel Seed Investment from ${myUser?.fullname}`,
-          timestamp: serverTimestamp()
-        });
-      });
-
-      showToast(`Invested $${numAmount} in ${targetGroupName}!`, 'success');
-
-    } else if (senderType === 'group') {
-      // --- GROUP TREASURY INVESTMENT (Board Consensus Required) ---
-      if (!myUser?.isLeader) {
-        showToast("ONLY the Group CEO/Leader is authorized to initiate Group Treasury transfers!", 'error');
-        return;
-      }
-
-      const myGroupObj = groups.find(g => (g.groupId || g.id) === myGroupId);
-      const memberCount = myGroupObj?.memberIds?.length || 1;
-
-      const startingGBal = Number(room?.settings?.startingGroupBalance) || 2000;
-      const maxSingleLimit = Math.floor(startingGBal * 0.7);
-
-      if (numAmount > maxSingleLimit) {
-        showToast(`PORTFOLIO DIVERSIFICATION RULE: Single Treasury investment cannot exceed 70% ($${maxSingleLimit}) of Treasury capital! You must diversify across startups.`, 'error');
-        return;
-      }
-
-      const currentTreasuryBal = Number(myGroupObj?.treasuryCapital ?? myGroupObj?.groupBalance ?? 0);
-      if (currentTreasuryBal < numAmount) {
-        showToast(`Insufficient Group Treasury balance! Current treasury balance is $${currentTreasuryBal}.`, 'error');
-        return;
-      }
-
-      // If group has only 1 member, auto-complete; otherwise create 'pending' board consensus transaction!
-      const isSolo = memberCount <= 1;
-
-      if (isSolo) {
-        const senderGroupRef = doc(db, 'rooms', roomId, 'groups', myGroupId);
-        const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
+    try {
+      if (senderType === 'personal') {
+        // --- PERSONAL CAPITAL INVESTMENT ---
+        const senderUserRef = doc(db, 'rooms', roomId, 'users', studentId);
 
         await runTransaction(db, async (transaction) => {
-          const senderDoc = await transaction.get(senderGroupRef);
-          const targetDoc = await transaction.get(targetGroupRef);
+          const userDoc = await transaction.get(senderUserRef);
+          if (!userDoc.exists()) throw new Error("Sender user document not found.");
 
-          const currentGBal = Number(senderDoc.data().groupBalance || 0);
-          const currentTreasury = Number(senderDoc.data().treasuryCapital ?? currentGBal);
+          const currentBal = Number(userDoc.data().personalBalance || 0);
+          const initialCap = Number(userDoc.data().initialPersonalBalance) || Number(room?.settings?.startingPersonalBalance) || 1000;
+
+          // STRICT RULE 2: Portfolio Diversification (Max 70% into a single startup)
+          const maxSingleLimit = Math.floor(initialCap * 0.7);
+          if (numAmount > maxSingleLimit) {
+            throw new Error(`PORTFOLIO DIVERSIFICATION RULE: A single investment cannot exceed 70% ($${maxSingleLimit}) of your total capital ($${initialCap})! You must diversify across at least 2 startups.`);
+          }
+
+          if (currentBal < numAmount) {
+            throw new Error(`Insufficient personal capital! Current balance is $${currentBal}.`);
+          }
+
+          const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
+          const targetDoc = await transaction.get(targetGroupRef);
+          if (!targetDoc.exists()) throw new Error("Target startup group not found.");
+
           const targetBal = Number(targetDoc.data().groupBalance || 0);
           const targetRaised = Number(targetDoc.data().raisedCapital || 0);
 
-          if (currentTreasury < numAmount) {
-            throw new Error(`Insufficient Group Treasury balance! Current balance is $${currentTreasury}.`);
-          }
-
-          transaction.update(senderGroupRef, { 
-            groupBalance: currentGBal - numAmount,
-            treasuryCapital: currentTreasury - numAmount
-          });
+          // Deduct from Personal Capital, Credit to Target Group Raised Capital
+          transaction.update(senderUserRef, { personalBalance: currentBal - numAmount, lastActive: serverTimestamp() });
           transaction.update(targetGroupRef, { 
             groupBalance: targetBal + numAmount,
             raisedCapital: targetRaised + numAmount
           });
 
+          // Record Completed Transaction
           const newTxRef = doc(txCollectionRef);
           transaction.set(newTxRef, {
-            senderType: 'group',
-            senderId: myGroupId,
-            senderName: `${myGroupObj.name} Treasury`,
+            senderType: 'personal',
+            senderId: studentId,
+            senderName: myUser?.fullname || studentId,
             senderGroupId: myGroupId,
             receiverGroupId: targetGroupId,
             receiverGroupName: targetGroupName,
@@ -458,34 +415,110 @@ export function GameProvider({ children }) {
             signatures: [studentId],
             requiredSignatures: 1,
             type: 'investment',
-            note: note || `Group Treasury Venture Round`,
+            note: note || `Angel Seed Investment from ${myUser?.fullname}`,
             timestamp: serverTimestamp()
           });
         });
 
-        showToast(`Treasury invested $${numAmount} in ${targetGroupName}!`, 'success');
+        showToast(`Invested $${numAmount} in ${targetGroupName}!`, 'success');
 
-      } else {
-        // Create Pending Transaction requiring 100% Board Signatures!
-        const newTxRef = doc(txCollectionRef);
-        await setDoc(newTxRef, {
-          senderType: 'group',
-          senderId: myGroupId,
-          senderName: `${myGroupObj.name} Treasury`,
-          senderGroupId: myGroupId,
-          receiverGroupId: targetGroupId,
-          receiverGroupName: targetGroupName,
-          amount: numAmount,
-          status: 'pending',
-          signatures: [studentId], // Leader auto-signs
-          requiredSignatures: memberCount,
-          type: 'investment',
-          note: note || `Treasury Investment (Awaiting Board Consensus)`,
-          timestamp: serverTimestamp()
-        });
+      } else if (senderType === 'group') {
+        // --- GROUP TREASURY INVESTMENT (Board Consensus Required) ---
+        if (!myUser?.isLeader) {
+          showToast("ONLY the Group CEO/Leader is authorized to initiate Group Treasury transfers!", 'error');
+          return;
+        }
 
-        showToast(`Initiated $${numAmount} Treasury Investment in ${targetGroupName}. Awaiting 100% Board Member Approval!`, 'info');
+        const myGroupObj = groups.find(g => (g.groupId || g.id) === myGroupId);
+        const memberCount = myGroupObj?.memberIds?.length || 1;
+
+        const startingGBal = Number(room?.settings?.startingGroupBalance) || 2000;
+        const maxSingleLimit = Math.floor(startingGBal * 0.7);
+
+        if (numAmount > maxSingleLimit) {
+          showToast(`PORTFOLIO DIVERSIFICATION RULE: Single Treasury investment cannot exceed 70% ($${maxSingleLimit}) of Treasury capital! You must diversify across startups.`, 'error');
+          return;
+        }
+
+        const currentTreasuryBal = Number(myGroupObj?.treasuryCapital ?? myGroupObj?.groupBalance ?? 0);
+        if (currentTreasuryBal < numAmount) {
+          showToast(`Insufficient Group Treasury balance! Current treasury balance is $${currentTreasuryBal}.`, 'error');
+          return;
+        }
+
+        // If group has only 1 member, auto-complete; otherwise create 'pending' board consensus transaction!
+        const isSolo = memberCount <= 1;
+
+        if (isSolo) {
+          const senderGroupRef = doc(db, 'rooms', roomId, 'groups', myGroupId);
+          const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
+
+          await runTransaction(db, async (transaction) => {
+            const senderDoc = await transaction.get(senderGroupRef);
+            const targetDoc = await transaction.get(targetGroupRef);
+
+            const currentGBal = Number(senderDoc.data().groupBalance || 0);
+            const currentTreasury = Number(senderDoc.data().treasuryCapital ?? currentGBal);
+            const targetBal = Number(targetDoc.data().groupBalance || 0);
+            const targetRaised = Number(targetDoc.data().raisedCapital || 0);
+
+            if (currentTreasury < numAmount) {
+              throw new Error(`Insufficient Group Treasury balance! Current balance is $${currentTreasury}.`);
+            }
+
+            transaction.update(senderGroupRef, { 
+              groupBalance: currentGBal - numAmount,
+              treasuryCapital: currentTreasury - numAmount
+            });
+            transaction.update(targetGroupRef, { 
+              groupBalance: targetBal + numAmount,
+              raisedCapital: targetRaised + numAmount
+            });
+
+            const newTxRef = doc(txCollectionRef);
+            transaction.set(newTxRef, {
+              senderType: 'group',
+              senderId: myGroupId,
+              senderName: `${myGroupObj.name} Treasury`,
+              senderGroupId: myGroupId,
+              receiverGroupId: targetGroupId,
+              receiverGroupName: targetGroupName,
+              amount: numAmount,
+              status: 'completed',
+              signatures: [studentId],
+              requiredSignatures: 1,
+              type: 'investment',
+              note: note || `Group Treasury Venture Round`,
+              timestamp: serverTimestamp()
+            });
+          });
+
+          showToast(`Treasury invested $${numAmount} in ${targetGroupName}!`, 'success');
+
+        } else {
+          // Create Pending Transaction requiring 100% Board Signatures!
+          const newTxRef = doc(txCollectionRef);
+          await setDoc(newTxRef, {
+            senderType: 'group',
+            senderId: myGroupId,
+            senderName: `${myGroupObj.name} Treasury`,
+            senderGroupId: myGroupId,
+            receiverGroupId: targetGroupId,
+            receiverGroupName: targetGroupName,
+            amount: numAmount,
+            status: 'pending',
+            signatures: [studentId], // Leader auto-signs
+            requiredSignatures: memberCount,
+            type: 'investment',
+            note: note || `Treasury Investment (Awaiting Board Consensus)`,
+            timestamp: serverTimestamp()
+          });
+
+          showToast(`Initiated $${numAmount} Treasury Investment in ${targetGroupName}. Awaiting 100% Board Member Approval!`, 'info');
+        }
       }
+    } catch (err) {
+      handleFirebaseError(err);
     }
   };
 
@@ -717,28 +750,92 @@ export function GameProvider({ children }) {
     try {
       const roomRef = doc(db, 'rooms', roomId);
       const targetNumGroups = Number(newSettings.numGroups);
-      const startingGroupBalance = Number(newSettings.startingGroupBalance);
+      const newStartingGroupBalance = Number(newSettings.startingGroupBalance);
+      const newStartingPersonalBalance = Number(newSettings.startingPersonalBalance);
       const maxMembers = Number(newSettings.maxGroupMembers);
 
-      // 1. Fetch current groups in Firestore
-      const groupsSnap = await getDocs(collection(db, 'rooms', roomId, 'groups'));
+      const oldStartingPersonal = Number(room?.settings?.startingPersonalBalance) || 1000;
+      const oldStartingGroup = Number(room?.settings?.startingGroupBalance) || 2000;
+      const diffPersonal = newStartingPersonalBalance - oldStartingPersonal;
+      const diffGroup = newStartingGroupBalance - oldStartingGroup;
+
+      // 1. Fetch current groups and users in Firestore
+      const [groupsSnap, usersSnap] = await Promise.all([
+        getDocs(collection(db, 'rooms', roomId, 'groups')),
+        getDocs(collection(db, 'rooms', roomId, 'users'))
+      ]);
+
       const existingGroups = [];
       groupsSnap.forEach(d => existingGroups.push({ id: d.id, ref: d.ref, ...d.data() }));
 
-      const batch = writeBatch(db);
+      const existingUsers = [];
+      usersSnap.forEach(d => existingUsers.push({ id: d.id, ref: d.ref, ...d.data() }));
 
-      // Update room settings doc
-      batch.update(roomRef, {
+      // Helper for batched writes respecting Firestore 500-op limit
+      let currentBatch = writeBatch(db);
+      let opCount = 0;
+
+      const commitIfFull = async () => {
+        if (opCount >= 400) {
+          await currentBatch.commit();
+          currentBatch = writeBatch(db);
+          opCount = 0;
+        }
+      };
+
+      // 2. Update room settings doc
+      currentBatch.update(roomRef, {
         'settings.softCapTarget': Number(newSettings.softCapTarget),
-        'settings.startingPersonalBalance': Number(newSettings.startingPersonalBalance),
-        'settings.startingGroupBalance': startingGroupBalance,
+        'settings.startingPersonalBalance': newStartingPersonalBalance,
+        'settings.startingGroupBalance': newStartingGroupBalance,
         'settings.maxGroupMembers': maxMembers,
         'settings.numGroups': targetNumGroups,
       });
+      opCount++;
 
-      // 2. If targetNumGroups is specified and valid, synchronize groups collection
+      // 3. Update all existing student member balances
+      const hasTransactions = transactions && transactions.length > 0;
+      for (const u of existingUsers) {
+        if (u.role !== 'teacher') {
+          let newPersonalBal;
+          if (!hasTransactions) {
+            newPersonalBal = newStartingPersonalBalance;
+          } else {
+            newPersonalBal = Math.max(0, (Number(u.personalBalance) || 0) + diffPersonal);
+          }
+
+          currentBatch.update(u.ref, {
+            personalBalance: newPersonalBal,
+            initialPersonalBalance: newStartingPersonalBalance
+          });
+          opCount++;
+          await commitIfFull();
+        }
+      }
+
+      // 4. Update all existing startup groups treasury and total balance
+      for (const g of existingGroups) {
+        let newTreasury;
+        const currentTreasury = Number(g.treasuryCapital ?? g.groupBalance ?? oldStartingGroup);
+        const currentRaised = Number(g.raisedCapital || 0);
+
+        if (!hasTransactions) {
+          newTreasury = newStartingGroupBalance;
+        } else {
+          newTreasury = Math.max(0, currentTreasury + diffGroup);
+        }
+        const newGroupBal = newTreasury + currentRaised;
+
+        currentBatch.update(g.ref, {
+          treasuryCapital: newTreasury,
+          groupBalance: newGroupBal
+        });
+        opCount++;
+        await commitIfFull();
+      }
+
+      // 5. If targetNumGroups is specified and valid, synchronize groups collection
       if (targetNumGroups && targetNumGroups >= 1) {
-        // Find highest existing group index
         const existingIndices = existingGroups.map(g => {
           const num = parseInt(String(g.groupId || g.id).replace(/\D/g, ''), 10);
           return isNaN(num) ? 0 : num;
@@ -750,40 +847,46 @@ export function GameProvider({ children }) {
           for (let i = maxExisting + 1; i <= targetNumGroups; i++) {
             const newGroupId = `group_${i}`;
             const newGroupRef = doc(db, 'rooms', roomId, 'groups', newGroupId);
-            batch.set(newGroupRef, {
+            currentBatch.set(newGroupRef, {
               groupId: newGroupId,
               name: `Group ${i}`,
               leaderId: null,
-              groupBalance: startingGroupBalance,
-              treasuryCapital: startingGroupBalance,
+              groupBalance: newStartingGroupBalance,
+              treasuryCapital: newStartingGroupBalance,
               raisedCapital: 0,
               memberIds: []
             });
+            opCount++;
+            await commitIfFull();
           }
         } else if (targetNumGroups < existingGroups.length) {
           // If decreasing groups: remove empty groups beyond targetNumGroups
-          // If a group has active members, we unassign those members or warn
           for (const g of existingGroups) {
             const num = parseInt(String(g.groupId || g.id).replace(/\D/g, ''), 10);
             if (num > targetNumGroups) {
-              // Unassign any members in this group first
               const members = g.memberIds || [];
               for (const mId of members) {
                 const uRef = doc(db, 'rooms', roomId, 'users', String(mId));
-                batch.update(uRef, { groupId: null, isLeader: false });
+                currentBatch.update(uRef, { groupId: null, isLeader: false });
+                opCount++;
+                await commitIfFull();
               }
-              // Delete the surplus group
-              batch.delete(g.ref);
+              currentBatch.delete(g.ref);
+              opCount++;
+              await commitIfFull();
             }
           }
         }
       }
 
-      await batch.commit();
-      showToast(`อัปเดตการตั้งค่าห้องเรียนเรียบร้อย! (กลุ่ม: ${targetNumGroups}, สมาชิกสูงสุด: ${maxMembers} คน/กลุ่ม)`, 'success');
+      if (opCount > 0) {
+        await currentBatch.commit();
+      }
+
+      showToast(`อัปเดตการตั้งค่าสำเร็จ! ปรับเงินทุนนักเรียนเป็น $${newStartingPersonalBalance} และเงินคลังกลุ่มเป็น $${newStartingGroupBalance} ให้ทุกคนเรียบร้อยแล้ว`, 'success');
     } catch (err) {
       console.error("Update settings error:", err);
-      showToast(`Failed to update settings: ${err.message}`, 'error');
+      handleFirebaseError(err, `Failed to update settings: ${err.message}`);
       throw err;
     }
   };
