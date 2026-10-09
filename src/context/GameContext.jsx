@@ -5,7 +5,6 @@ import {
   onSnapshot, 
   setDoc, 
   updateDoc, 
-  runTransaction,
   serverTimestamp,
   getDoc,
   getDocs,
@@ -238,61 +237,66 @@ export function GameProvider({ children }) {
       const groupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
       const userRef = doc(db, 'rooms', roomId, 'users', studentId);
 
-      await runTransaction(db, async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        const groupDoc = await transaction.get(groupRef);
-        if (!groupDoc.exists()) throw new Error("Group does not exist!");
+      const [userDoc, groupDoc] = await Promise.all([
+        getDoc(userRef),
+        getDoc(groupRef)
+      ]);
 
-        const groupData = groupDoc.data();
-        const maxMembers = room?.settings?.maxGroupMembers || 5;
-        const currentMembers = groupData.memberIds || [];
+      if (!groupDoc.exists()) throw new Error("Group does not exist!");
 
-        if (currentMembers.length >= maxMembers) {
-          throw new Error(`Group is full! Maximum ${maxMembers} members allowed.`);
-        }
+      const groupData = groupDoc.data();
+      const maxMembers = room?.settings?.maxGroupMembers || 5;
+      const currentMembers = groupData.memberIds || [];
 
-        if (currentMembers.includes(studentId)) {
-          throw new Error("You are already in this group!");
-        }
+      if (currentMembers.length >= maxMembers) {
+        throw new Error(`Group is full! Maximum ${maxMembers} members allowed.`);
+      }
 
-        const prevGroupId = userDoc.exists() ? userDoc.data().groupId : null;
-        let prevGroupDoc = null;
-        if (prevGroupId && prevGroupId !== targetGroupId) {
-          const prevGroupRef = doc(db, 'rooms', roomId, 'groups', prevGroupId);
-          prevGroupDoc = await transaction.get(prevGroupRef);
-        }
+      if (currentMembers.includes(studentId)) {
+        throw new Error("You are already in this group!");
+      }
 
-        // Clean up old group if student switched
-        if (prevGroupDoc && prevGroupDoc.exists()) {
-          const prevData = prevGroupDoc.data();
-          const updatedPrevMembers = (prevData.memberIds || []).filter(id => String(id) !== studentId);
-          const prevLeaderId = String(prevData.leaderId) === studentId
-            ? (updatedPrevMembers.length > 0 ? updatedPrevMembers[0] : null)
-            : prevData.leaderId;
+      const prevGroupId = userDoc.exists() ? userDoc.data().groupId : null;
+      let prevGroupDoc = null;
+      if (prevGroupId && prevGroupId !== targetGroupId) {
+        const prevGroupRef = doc(db, 'rooms', roomId, 'groups', prevGroupId);
+        prevGroupDoc = await getDoc(prevGroupRef);
+      }
 
-          transaction.update(prevGroupDoc.ref, {
-            memberIds: updatedPrevMembers,
-            leaderId: prevLeaderId
-          });
-        }
+      const batch = writeBatch(db);
 
-        // Determine if student is the first to join -> becomes Leader (CEO)
-        const isFirst = currentMembers.length === 0;
-        const newLeaderId = isFirst ? studentId : (groupData.leaderId || null);
+      // Clean up old group if student switched
+      if (prevGroupDoc && prevGroupDoc.exists()) {
+        const prevData = prevGroupDoc.data();
+        const updatedPrevMembers = (prevData.memberIds || []).filter(id => String(id) !== studentId);
+        const prevLeaderId = String(prevData.leaderId) === studentId
+          ? (updatedPrevMembers.length > 0 ? updatedPrevMembers[0] : null)
+          : prevData.leaderId;
 
-        // Update Group document
-        transaction.update(groupRef, {
-          memberIds: [...currentMembers, studentId],
-          leaderId: newLeaderId
+        batch.update(prevGroupDoc.ref, {
+          memberIds: updatedPrevMembers,
+          leaderId: prevLeaderId
         });
+      }
 
-        // Update Student document
-        transaction.update(userRef, {
-          groupId: targetGroupId,
-          isLeader: isFirst,
-          lastActive: serverTimestamp()
-        });
+      // Determine if student is the first to join -> becomes Leader (CEO)
+      const isFirst = currentMembers.length === 0;
+      const newLeaderId = isFirst ? studentId : (groupData.leaderId || null);
+
+      // Update Group document
+      batch.update(groupRef, {
+        memberIds: [...currentMembers, studentId],
+        leaderId: newLeaderId
       });
+
+      // Update Student document
+      batch.update(userRef, {
+        groupId: targetGroupId,
+        isLeader: isFirst,
+        lastActive: serverTimestamp()
+      });
+
+      await batch.commit();
 
       showToast(`Joined ${targetGroupId.replace('group_', 'Group ')} successfully!`, 'success');
     } catch (err) {
@@ -307,20 +311,19 @@ export function GameProvider({ children }) {
     if (!roomId) return;
     try {
       const groupRef = doc(db, 'rooms', roomId, 'groups', groupId);
+      const groupDoc = await getDoc(groupRef);
+      if (!groupDoc.exists()) return;
 
-      await runTransaction(db, async (transaction) => {
-        const groupDoc = await transaction.get(groupRef);
-        if (!groupDoc.exists()) return;
+      const currentMembers = groupDoc.data().memberIds || [];
+      const batch = writeBatch(db);
 
-        const currentMembers = groupDoc.data().memberIds || [];
-        
-        for (const mId of currentMembers) {
-          const uRef = doc(db, 'rooms', roomId, 'users', String(mId));
-          transaction.update(uRef, { isLeader: (String(mId) === String(newLeaderId)) });
-        }
+      for (const mId of currentMembers) {
+        const uRef = doc(db, 'rooms', roomId, 'users', String(mId));
+        batch.update(uRef, { isLeader: (String(mId) === String(newLeaderId)) });
+      }
 
-        transaction.update(groupRef, { leaderId: String(newLeaderId) });
-      });
+      batch.update(groupRef, { leaderId: String(newLeaderId) });
+      await batch.commit();
 
       showToast("Group CEO/Leader reassigned successfully!", 'success');
     } catch (err) {
@@ -369,56 +372,60 @@ export function GameProvider({ children }) {
       if (senderType === 'personal') {
         // --- PERSONAL CAPITAL INVESTMENT ---
         const senderUserRef = doc(db, 'rooms', roomId, 'users', studentId);
+        const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
 
-        await runTransaction(db, async (transaction) => {
-          const userDoc = await transaction.get(senderUserRef);
-          if (!userDoc.exists()) throw new Error("Sender user document not found.");
+        const [userDoc, targetDoc] = await Promise.all([
+          getDoc(senderUserRef),
+          getDoc(targetGroupRef)
+        ]);
 
-          const currentBal = Number(userDoc.data().personalBalance || 0);
-          const initialCap = Number(userDoc.data().initialPersonalBalance) || Number(room?.settings?.startingPersonalBalance) || 1000;
+        if (!userDoc.exists()) throw new Error("Sender user document not found.");
+        if (!targetDoc.exists()) throw new Error("Target startup group not found.");
 
-          // STRICT RULE 2: Portfolio Diversification (Max 70% into a single startup)
-          const maxSingleLimit = Math.floor(initialCap * 0.7);
-          if (numAmount > maxSingleLimit) {
-            throw new Error(`PORTFOLIO DIVERSIFICATION RULE: A single investment cannot exceed 70% ($${maxSingleLimit}) of your total capital ($${initialCap})! You must diversify across at least 2 startups.`);
-          }
+        const currentBal = Number(userDoc.data().personalBalance || 0);
+        const initialCap = Number(userDoc.data().initialPersonalBalance) || Number(room?.settings?.startingPersonalBalance) || 1000;
 
-          if (currentBal < numAmount) {
-            throw new Error(`Insufficient personal capital! Current balance is $${currentBal}.`);
-          }
+        // STRICT RULE 2: Portfolio Diversification (Max 70% into a single startup)
+        const maxSingleLimit = Math.floor(initialCap * 0.7);
+        if (numAmount > maxSingleLimit) {
+          throw new Error(`PORTFOLIO DIVERSIFICATION RULE: A single investment cannot exceed 70% ($${maxSingleLimit}) of your total capital ($${initialCap})! You must diversify across at least 2 startups.`);
+        }
 
-          const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
-          const targetDoc = await transaction.get(targetGroupRef);
-          if (!targetDoc.exists()) throw new Error("Target startup group not found.");
+        if (currentBal < numAmount) {
+          throw new Error(`Insufficient personal capital! Current balance is $${currentBal}.`);
+        }
 
-          const targetBal = Number(targetDoc.data().groupBalance || 0);
-          const targetRaised = Number(targetDoc.data().raisedCapital || 0);
+        const targetBal = Number(targetDoc.data().groupBalance || 0);
+        const targetRaised = Number(targetDoc.data().raisedCapital || 0);
 
-          // Deduct from Personal Capital, Credit to Target Group Raised Capital
-          transaction.update(senderUserRef, { personalBalance: currentBal - numAmount, lastActive: serverTimestamp() });
-          transaction.update(targetGroupRef, { 
-            groupBalance: targetBal + numAmount,
-            raisedCapital: targetRaised + numAmount
-          });
+        const batch = writeBatch(db);
 
-          // Record Completed Transaction
-          const newTxRef = doc(txCollectionRef);
-          transaction.set(newTxRef, {
-            senderType: 'personal',
-            senderId: studentId,
-            senderName: myUser?.fullname || studentId,
-            senderGroupId: myGroupId,
-            receiverGroupId: targetGroupId,
-            receiverGroupName: targetGroupName,
-            amount: numAmount,
-            status: 'completed',
-            signatures: [studentId],
-            requiredSignatures: 1,
-            type: 'investment',
-            note: note || `Angel Seed Investment from ${myUser?.fullname}`,
-            timestamp: serverTimestamp()
-          });
+        // Deduct from Personal Capital, Credit to Target Group Raised Capital
+        batch.update(senderUserRef, { personalBalance: currentBal - numAmount, lastActive: serverTimestamp() });
+        batch.update(targetGroupRef, { 
+          groupBalance: targetBal + numAmount,
+          raisedCapital: targetRaised + numAmount
         });
+
+        // Record Completed Transaction
+        const newTxRef = doc(txCollectionRef);
+        batch.set(newTxRef, {
+          senderType: 'personal',
+          senderId: studentId,
+          senderName: myUser?.fullname || studentId,
+          senderGroupId: myGroupId,
+          receiverGroupId: targetGroupId,
+          receiverGroupName: targetGroupName,
+          amount: numAmount,
+          status: 'completed',
+          signatures: [studentId],
+          requiredSignatures: 1,
+          type: 'investment',
+          note: note || `Angel Seed Investment from ${myUser?.fullname}`,
+          timestamp: serverTimestamp()
+        });
+
+        await batch.commit();
 
         showToast(`Invested $${numAmount} in ${targetGroupName}!`, 'success');
 
@@ -453,45 +460,51 @@ export function GameProvider({ children }) {
           const senderGroupRef = doc(db, 'rooms', roomId, 'groups', myGroupId);
           const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
 
-          await runTransaction(db, async (transaction) => {
-            const senderDoc = await transaction.get(senderGroupRef);
-            const targetDoc = await transaction.get(targetGroupRef);
+          const [senderDoc, targetDoc] = await Promise.all([
+            getDoc(senderGroupRef),
+            getDoc(targetGroupRef)
+          ]);
 
-            const currentGBal = Number(senderDoc.data().groupBalance || 0);
-            const currentTreasury = Number(senderDoc.data().treasuryCapital ?? currentGBal);
-            const targetBal = Number(targetDoc.data().groupBalance || 0);
-            const targetRaised = Number(targetDoc.data().raisedCapital || 0);
+          if (!senderDoc.exists() || !targetDoc.exists()) throw new Error("Group documents not found.");
 
-            if (currentTreasury < numAmount) {
-              throw new Error(`Insufficient Group Treasury balance! Current balance is $${currentTreasury}.`);
-            }
+          const currentGBal = Number(senderDoc.data().groupBalance || 0);
+          const currentTreasury = Number(senderDoc.data().treasuryCapital ?? currentGBal);
+          const targetBal = Number(targetDoc.data().groupBalance || 0);
+          const targetRaised = Number(targetDoc.data().raisedCapital || 0);
 
-            transaction.update(senderGroupRef, { 
-              groupBalance: currentGBal - numAmount,
-              treasuryCapital: currentTreasury - numAmount
-            });
-            transaction.update(targetGroupRef, { 
-              groupBalance: targetBal + numAmount,
-              raisedCapital: targetRaised + numAmount
-            });
+          if (currentTreasury < numAmount) {
+            throw new Error(`Insufficient Group Treasury balance! Current balance is $${currentTreasury}.`);
+          }
 
-            const newTxRef = doc(txCollectionRef);
-            transaction.set(newTxRef, {
-              senderType: 'group',
-              senderId: myGroupId,
-              senderName: `${myGroupObj.name} Treasury`,
-              senderGroupId: myGroupId,
-              receiverGroupId: targetGroupId,
-              receiverGroupName: targetGroupName,
-              amount: numAmount,
-              status: 'completed',
-              signatures: [studentId],
-              requiredSignatures: 1,
-              type: 'investment',
-              note: note || `Group Treasury Venture Round`,
-              timestamp: serverTimestamp()
-            });
+          const batch = writeBatch(db);
+
+          batch.update(senderGroupRef, { 
+            groupBalance: currentGBal - numAmount,
+            treasuryCapital: currentTreasury - numAmount
           });
+          batch.update(targetGroupRef, { 
+            groupBalance: targetBal + numAmount,
+            raisedCapital: targetRaised + numAmount
+          });
+
+          const newTxRef = doc(txCollectionRef);
+          batch.set(newTxRef, {
+            senderType: 'group',
+            senderId: myGroupId,
+            senderName: `${myGroupObj.name} Treasury`,
+            senderGroupId: myGroupId,
+            receiverGroupId: targetGroupId,
+            receiverGroupName: targetGroupName,
+            amount: numAmount,
+            status: 'completed',
+            signatures: [studentId],
+            requiredSignatures: 1,
+            type: 'investment',
+            note: note || `Group Treasury Venture Round`,
+            timestamp: serverTimestamp()
+          });
+
+          await batch.commit();
 
           showToast(`Treasury invested $${numAmount} in ${targetGroupName}!`, 'success');
 
@@ -533,62 +546,65 @@ export function GameProvider({ children }) {
 
     try {
       let isCompleted = false;
+      const txDoc = await getDoc(txRef);
+      if (!txDoc.exists()) throw new Error("Transaction document not found.");
 
-      await runTransaction(db, async (transaction) => {
-        const txDoc = await transaction.get(txRef);
-        if (!txDoc.exists()) throw new Error("Transaction document not found.");
+      const txData = txDoc.data();
+      if (txData.status !== 'pending') throw new Error("Transaction is no longer pending.");
 
-        const txData = txDoc.data();
-        if (txData.status !== 'pending') throw new Error("Transaction is no longer pending.");
+      const currentSigs = Array.isArray(txData.signatures) ? txData.signatures : [];
+      if (currentSigs.includes(studentId)) {
+        throw new Error("You have already signed this transaction.");
+      }
 
-        const currentSigs = Array.isArray(txData.signatures) ? txData.signatures : [];
-        if (currentSigs.includes(studentId)) {
-          throw new Error("You have already signed this transaction.");
+      const updatedSigs = [...currentSigs, studentId];
+      const reqSigs = Number(txData.requiredSignatures) || 1;
+
+      const batch = writeBatch(db);
+
+      if (updatedSigs.length >= reqSigs) {
+        // 100% Consensus Reached! Execute Transfer Atomics!
+        const senderGroupRef = doc(db, 'rooms', roomId, 'groups', txData.senderGroupId);
+        const targetGroupRef = doc(db, 'rooms', roomId, 'groups', txData.receiverGroupId);
+
+        const [senderDoc, targetDoc] = await Promise.all([
+          getDoc(senderGroupRef),
+          getDoc(targetGroupRef)
+        ]);
+
+        if (!senderDoc.exists() || !targetDoc.exists()) throw new Error("Group documents not found.");
+
+        const senderGBal = Number(senderDoc.data().groupBalance || 0);
+        const senderTreasury = Number(senderDoc.data().treasuryCapital ?? senderGBal);
+        const targetGBal = Number(targetDoc.data().groupBalance || 0);
+        const targetRaised = Number(targetDoc.data().raisedCapital || 0);
+
+        if (senderTreasury < txData.amount) {
+          await updateDoc(txRef, { status: 'rejected', note: 'Failed: Insufficient Treasury Funds' });
+          throw new Error("Transaction failed due to insufficient Treasury balance.");
         }
 
-        const updatedSigs = [...currentSigs, studentId];
-        const reqSigs = Number(txData.requiredSignatures) || 1;
+        // Execute Balance Transfers & Mark Completed
+        batch.update(senderGroupRef, { 
+          groupBalance: senderGBal - txData.amount,
+          treasuryCapital: senderTreasury - txData.amount
+        });
+        batch.update(targetGroupRef, { 
+          groupBalance: targetGBal + txData.amount,
+          raisedCapital: targetRaised + txData.amount
+        });
+        batch.update(txRef, {
+          signatures: updatedSigs,
+          status: 'completed'
+        });
 
-        if (updatedSigs.length >= reqSigs) {
-          // 100% Consensus Reached! Execute Transfer Atomics!
-          const senderGroupRef = doc(db, 'rooms', roomId, 'groups', txData.senderGroupId);
-          const targetGroupRef = doc(db, 'rooms', roomId, 'groups', txData.receiverGroupId);
+        isCompleted = true;
+      } else {
+        // Just update signatures array
+        batch.update(txRef, { signatures: updatedSigs });
+      }
 
-          const senderDoc = await transaction.get(senderGroupRef);
-          const targetDoc = await transaction.get(targetGroupRef);
-
-          if (!senderDoc.exists() || !targetDoc.exists()) throw new Error("Group documents not found.");
-
-          const senderGBal = Number(senderDoc.data().groupBalance || 0);
-          const senderTreasury = Number(senderDoc.data().treasuryCapital ?? senderGBal);
-          const targetGBal = Number(targetDoc.data().groupBalance || 0);
-          const targetRaised = Number(targetDoc.data().raisedCapital || 0);
-
-          if (senderTreasury < txData.amount) {
-            transaction.update(txRef, { status: 'rejected', note: 'Failed: Insufficient Treasury Funds' });
-            throw new Error("Transaction failed due to insufficient Treasury balance.");
-          }
-
-          // Execute Balance Transfers & Mark Completed
-          transaction.update(senderGroupRef, { 
-            groupBalance: senderGBal - txData.amount,
-            treasuryCapital: senderTreasury - txData.amount
-          });
-          transaction.update(targetGroupRef, { 
-            groupBalance: targetGBal + txData.amount,
-            raisedCapital: targetRaised + txData.amount
-          });
-          transaction.update(txRef, {
-            signatures: updatedSigs,
-            status: 'completed'
-          });
-
-          isCompleted = true;
-        } else {
-          // Just update signatures array
-          transaction.update(txRef, { signatures: updatedSigs });
-        }
-      });
+      await batch.commit();
 
       if (isCompleted) {
         showToast("🎉 100% Board Approval Reached! Venture investment executed successfully!", 'success');
@@ -598,7 +614,7 @@ export function GameProvider({ children }) {
 
       return isCompleted;
     } catch (err) {
-      showToast(err.message, 'error');
+      handleFirebaseError(err);
       return false;
     }
   };
@@ -674,65 +690,68 @@ export function GameProvider({ children }) {
       let newlyCompletedRank = null;
       let winnerReward = 0;
 
-      await runTransaction(db, async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        const roomDoc = await transaction.get(roomRef);
+      const [userDoc, roomDoc] = await Promise.all([
+        getDoc(userRef),
+        getDoc(roomRef)
+      ]);
 
-        if (!userDoc.exists() || !roomDoc.exists()) return;
+      if (!userDoc.exists() || !roomDoc.exists()) return;
 
-        const currentTaps = Number(userDoc.data().miningTaps || 0);
-        const roomData = roomDoc.data();
-        const currentWinners = roomData.miningState?.winners || [];
+      const currentTaps = Number(userDoc.data().miningTaps || 0);
+      const roomData = roomDoc.data();
+      const currentWinners = roomData.miningState?.winners || [];
 
-        const alreadyWon = currentWinners.some(w => String(w.stdId) === studentId);
-        if (alreadyWon) return;
+      const alreadyWon = currentWinners.some(w => String(w.stdId) === studentId);
+      if (alreadyWon) return;
 
-        const newTaps = currentTaps + 1;
-        transaction.update(userRef, { miningTaps: newTaps, lastActive: serverTimestamp() });
+      const newTaps = currentTaps + 1;
+      const batch = writeBatch(db);
+      batch.update(userRef, { miningTaps: newTaps, lastActive: serverTimestamp() });
 
-        if (newTaps >= 50 && currentWinners.length < 3) {
-          newlyCompletedRank = currentWinners.length + 1;
-          winnerReward = newlyCompletedRank === 1 ? 500 : (newlyCompletedRank === 2 ? 300 : 100);
+      if (newTaps >= 50 && currentWinners.length < 3) {
+        newlyCompletedRank = currentWinners.length + 1;
+        winnerReward = newlyCompletedRank === 1 ? 500 : (newlyCompletedRank === 2 ? 300 : 100);
 
-          const myUser = users.find(u => String(u.std_id || u.stdId) === studentId);
-          const winnerObj = {
-            stdId: studentId,
-            fullname: myUser?.fullname || studentId,
-            groupId: myUser?.groupId || 'group_1',
-            rank: newlyCompletedRank,
-            reward: winnerReward,
-            timestamp: new Date().toISOString()
-          };
+        const myUser = users.find(u => String(u.std_id || u.stdId) === studentId);
+        const winnerObj = {
+          stdId: studentId,
+          fullname: myUser?.fullname || studentId,
+          groupId: myUser?.groupId || 'group_1',
+          rank: newlyCompletedRank,
+          reward: winnerReward,
+          timestamp: new Date().toISOString()
+        };
 
-          const updatedWinners = [...currentWinners, winnerObj];
-          transaction.update(roomRef, {
-            'miningState.winners': updatedWinners
-          });
+        const updatedWinners = [...currentWinners, winnerObj];
+        batch.update(roomRef, {
+          'miningState.winners': updatedWinners
+        });
 
-          const currentPersonalBal = Number(userDoc.data().personalBalance || 0);
-          transaction.update(userRef, {
-            personalBalance: currentPersonalBal + winnerReward
-          });
+        const currentPersonalBal = Number(userDoc.data().personalBalance || 0);
+        batch.update(userRef, {
+          personalBalance: currentPersonalBal + winnerReward
+        });
 
-          const txCollectionRef = collection(db, 'rooms', roomId, 'transactions');
-          const newTxRef = doc(txCollectionRef);
-          transaction.set(newTxRef, {
-            senderType: 'system',
-            senderId: 'SYSTEM_MINING',
-            senderName: '⚡ Mining Bonus Round',
-            senderGroupId: 'SYSTEM',
-            receiverGroupId: myUser?.groupId || 'group_1',
-            receiverGroupName: `${(myUser?.groupId || 'group_1').replace('group_', 'Group ')}`,
-            amount: winnerReward,
-            status: 'completed',
-            signatures: [studentId],
-            requiredSignatures: 1,
-            type: 'mining_reward',
-            note: `🏆 Rank ${newlyCompletedRank} Mining Reward won by ${myUser?.fullname}`,
-            timestamp: serverTimestamp()
-          });
-        }
-      });
+        const txCollectionRef = collection(db, 'rooms', roomId, 'transactions');
+        const newTxRef = doc(txCollectionRef);
+        batch.set(newTxRef, {
+          senderType: 'system',
+          senderId: 'SYSTEM_MINING',
+          senderName: '⚡ Mining Bonus Round',
+          senderGroupId: 'SYSTEM',
+          receiverGroupId: myUser?.groupId || 'group_1',
+          receiverGroupName: `${(myUser?.groupId || 'group_1').replace('group_', 'Group ')}`,
+          amount: winnerReward,
+          status: 'completed',
+          signatures: [studentId],
+          requiredSignatures: 1,
+          type: 'mining_reward',
+          note: `🏆 Rank ${newlyCompletedRank} Mining Reward won by ${myUser?.fullname}`,
+          timestamp: serverTimestamp()
+        });
+      }
+
+      await batch.commit();
 
       if (newlyCompletedRank) {
         showToast(`🏆 BOOM! You finished Rank #${newlyCompletedRank} and won +$${winnerReward}!`, 'success');
@@ -968,77 +987,77 @@ export function GameProvider({ children }) {
     try {
       const stdIdStr = String(studentId);
       const userRef = doc(db, 'rooms', roomId, 'users', stdIdStr);
+      const userDoc = await getDoc(userRef);
+      if (!userDoc.exists()) throw new Error("ไม่พบข้อมูลนักศึกษา");
 
-      await runTransaction(db, async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        if (!userDoc.exists()) throw new Error("ไม่พบข้อมูลนักศึกษา");
+      const userData = userDoc.data();
+      const currentGroupId = userData.groupId;
 
-        const userData = userDoc.data();
-        const currentGroupId = userData.groupId;
+      if (currentGroupId === targetGroupId) return;
 
-        if (currentGroupId === targetGroupId) return;
+      const batch = writeBatch(db);
 
-        // If currently in a group, remove from old group
-        if (currentGroupId) {
-          const oldGroupRef = doc(db, 'rooms', roomId, 'groups', currentGroupId);
-          const oldGroupDoc = await transaction.get(oldGroupRef);
-          if (oldGroupDoc.exists()) {
-            const oldData = oldGroupDoc.data();
-            const updatedMembers = (oldData.memberIds || []).filter(id => String(id) !== stdIdStr);
-            let updatedLeaderId = oldData.leaderId;
+      // If currently in a group, remove from old group
+      if (currentGroupId) {
+        const oldGroupRef = doc(db, 'rooms', roomId, 'groups', currentGroupId);
+        const oldGroupDoc = await getDoc(oldGroupRef);
+        if (oldGroupDoc.exists()) {
+          const oldData = oldGroupDoc.data();
+          const updatedMembers = (oldData.memberIds || []).filter(id => String(id) !== stdIdStr);
+          let updatedLeaderId = oldData.leaderId;
 
-            // If user was leader, assign new leader if anyone left
-            if (String(oldData.leaderId) === stdIdStr) {
-              updatedLeaderId = updatedMembers.length > 0 ? updatedMembers[0] : null;
-              if (updatedLeaderId) {
-                const newLeaderUserRef = doc(db, 'rooms', roomId, 'users', String(updatedLeaderId));
-                transaction.update(newLeaderUserRef, { isLeader: true });
-              }
+          // If user was leader, assign new leader if anyone left
+          if (String(oldData.leaderId) === stdIdStr) {
+            updatedLeaderId = updatedMembers.length > 0 ? updatedMembers[0] : null;
+            if (updatedLeaderId) {
+              const newLeaderUserRef = doc(db, 'rooms', roomId, 'users', String(updatedLeaderId));
+              batch.update(newLeaderUserRef, { isLeader: true });
             }
-
-            transaction.update(oldGroupRef, {
-              memberIds: updatedMembers,
-              leaderId: updatedLeaderId
-            });
-          }
-        }
-
-        // If targetGroupId provided, add to new group
-        if (targetGroupId) {
-          const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
-          const targetGroupDoc = await transaction.get(targetGroupRef);
-          if (!targetGroupDoc.exists()) throw new Error("ไม่พบข้อมูลกลุ่มเป้าหมาย");
-
-          const targetData = targetGroupDoc.data();
-          const targetMembers = targetData.memberIds || [];
-          const maxMembers = room?.settings?.maxGroupMembers || 5;
-
-          if (targetMembers.length >= maxMembers) {
-            throw new Error(`กลุ่มนี้มีสมาชิกเต็มแล้ว (${maxMembers} คน)`);
           }
 
-          const isFirstMember = targetMembers.length === 0;
-          const newTargetMembers = [...targetMembers.filter(id => String(id) !== stdIdStr), stdIdStr];
-          const targetLeaderId = isFirstMember ? stdIdStr : (targetData.leaderId || stdIdStr);
-
-          transaction.update(targetGroupRef, {
-            memberIds: newTargetMembers,
-            leaderId: targetLeaderId
-          });
-
-          transaction.update(userRef, {
-            groupId: targetGroupId,
-            isLeader: isFirstMember
-          });
-        } else {
-          // Unassigned
-          transaction.update(userRef, {
-            groupId: null,
-            isLeader: false
+          batch.update(oldGroupRef, {
+            memberIds: updatedMembers,
+            leaderId: updatedLeaderId
           });
         }
-      });
+      }
 
+      // If targetGroupId provided, add to new group
+      if (targetGroupId) {
+        const targetGroupRef = doc(db, 'rooms', roomId, 'groups', targetGroupId);
+        const targetGroupDoc = await getDoc(targetGroupRef);
+        if (!targetGroupDoc.exists()) throw new Error("ไม่พบข้อมูลกลุ่มเป้าหมาย");
+
+        const targetData = targetGroupDoc.data();
+        const targetMembers = targetData.memberIds || [];
+        const maxMembers = room?.settings?.maxGroupMembers || 5;
+
+        if (targetMembers.length >= maxMembers) {
+          throw new Error(`กลุ่มนี้มีสมาชิกเต็มแล้ว (${maxMembers} คน)`);
+        }
+
+        const isFirstMember = targetMembers.length === 0;
+        const newTargetMembers = [...targetMembers.filter(id => String(id) !== stdIdStr), stdIdStr];
+        const targetLeaderId = isFirstMember ? stdIdStr : (targetData.leaderId || stdIdStr);
+
+        batch.update(targetGroupRef, {
+          memberIds: newTargetMembers,
+          leaderId: targetLeaderId
+        });
+
+        batch.update(userRef, {
+          groupId: targetGroupId,
+          isLeader: isFirstMember
+        });
+      } else {
+        // Unassigned
+        batch.update(userRef, {
+          groupId: null,
+          isLeader: false
+        });
+      }
+
+      await batch.commit();
       showToast(`ย้ายกลุ่มนักศึกษาสำเร็จ!`, 'success');
     } catch (err) {
       console.error("Move student error:", err);
@@ -1067,41 +1086,40 @@ export function GameProvider({ children }) {
     try {
       const stdIdStr = String(studentId);
       const userRef = doc(db, 'rooms', roomId, 'users', stdIdStr);
+      const userDoc = await getDoc(userRef);
+      if (!userDoc.exists()) return;
 
-      await runTransaction(db, async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        if (!userDoc.exists()) return;
+      const userData = userDoc.data();
+      const currentGroupId = userData.groupId;
+      const batch = writeBatch(db);
 
-        const userData = userDoc.data();
-        const currentGroupId = userData.groupId;
+      // If student belongs to a group, remove from group roster
+      if (currentGroupId) {
+        const groupRef = doc(db, 'rooms', roomId, 'groups', currentGroupId);
+        const groupDoc = await getDoc(groupRef);
+        if (groupDoc.exists()) {
+          const groupData = groupDoc.data();
+          const updatedMembers = (groupData.memberIds || []).filter(id => String(id) !== stdIdStr);
+          let updatedLeaderId = groupData.leaderId;
 
-        // If student belongs to a group, remove from group roster
-        if (currentGroupId) {
-          const groupRef = doc(db, 'rooms', roomId, 'groups', currentGroupId);
-          const groupDoc = await transaction.get(groupRef);
-          if (groupDoc.exists()) {
-            const groupData = groupDoc.data();
-            const updatedMembers = (groupData.memberIds || []).filter(id => String(id) !== stdIdStr);
-            let updatedLeaderId = groupData.leaderId;
-
-            if (String(groupData.leaderId) === stdIdStr) {
-              updatedLeaderId = updatedMembers.length > 0 ? updatedMembers[0] : null;
-              if (updatedLeaderId) {
-                const newLeaderUserRef = doc(db, 'rooms', roomId, 'users', String(updatedLeaderId));
-                transaction.update(newLeaderUserRef, { isLeader: true });
-              }
+          if (String(groupData.leaderId) === stdIdStr) {
+            updatedLeaderId = updatedMembers.length > 0 ? updatedMembers[0] : null;
+            if (updatedLeaderId) {
+              const newLeaderUserRef = doc(db, 'rooms', roomId, 'users', String(updatedLeaderId));
+              batch.update(newLeaderUserRef, { isLeader: true });
             }
-
-            transaction.update(groupRef, {
-              memberIds: updatedMembers,
-              leaderId: updatedLeaderId
-            });
           }
-        }
 
-        // Delete user document
-        transaction.delete(userRef);
-      });
+          batch.update(groupRef, {
+            memberIds: updatedMembers,
+            leaderId: updatedLeaderId
+          });
+        }
+      }
+
+      // Delete user document
+      batch.delete(userRef);
+      await batch.commit();
 
       showToast(`ลบนักศึกษา (${studentId}) ออกจากห้องเรียนสำเร็จ!`, 'success');
     } catch (err) {
@@ -1118,57 +1136,57 @@ export function GameProvider({ children }) {
     if (!roomId || !currentUser?.stdId) return;
     try {
       const txRef = doc(db, 'rooms', roomId, 'transactions', txId);
+      const txDoc = await getDoc(txRef);
+      if (!txDoc.exists()) throw new Error("Transaction document not found.");
 
-      await runTransaction(db, async (transaction) => {
-        const txDoc = await transaction.get(txRef);
-        if (!txDoc.exists()) throw new Error("Transaction document not found.");
+      const txData = txDoc.data();
+      if (txData.status !== 'completed') {
+        throw new Error("Only completed investments can be revoked.");
+      }
 
-        const txData = txDoc.data();
-        if (txData.status !== 'completed') {
-          throw new Error("Only completed investments can be revoked.");
+      const amount = Number(txData.amount || 0);
+      const batch = writeBatch(db);
+
+      // Deduct from receiver startup group
+      const targetGroupRef = doc(db, 'rooms', roomId, 'groups', txData.receiverGroupId);
+      const targetDoc = await getDoc(targetGroupRef);
+      if (targetDoc.exists()) {
+        const currentGroupBal = Number(targetDoc.data().groupBalance || 0);
+        const currentRaised = Number(targetDoc.data().raisedCapital || 0);
+        batch.update(targetGroupRef, {
+          groupBalance: Math.max(0, currentGroupBal - amount),
+          raisedCapital: Math.max(0, currentRaised - amount)
+        });
+      }
+
+      // Refund back to sender
+      if (txData.senderType === 'personal') {
+        const senderUserRef = doc(db, 'rooms', roomId, 'users', String(txData.senderId));
+        const userDoc = await getDoc(senderUserRef);
+        if (userDoc.exists()) {
+          const currentPersonal = Number(userDoc.data().personalBalance || 0);
+          batch.update(senderUserRef, { personalBalance: currentPersonal + amount });
         }
-
-        const amount = Number(txData.amount || 0);
-
-        // Deduct from receiver startup group
-        const targetGroupRef = doc(db, 'rooms', roomId, 'groups', txData.receiverGroupId);
-        const targetDoc = await transaction.get(targetGroupRef);
-        if (targetDoc.exists()) {
-          const currentGroupBal = Number(targetDoc.data().groupBalance || 0);
-          const currentRaised = Number(targetDoc.data().raisedCapital || 0);
-          transaction.update(targetGroupRef, {
-            groupBalance: Math.max(0, currentGroupBal - amount),
-            raisedCapital: Math.max(0, currentRaised - amount)
+      } else if (txData.senderType === 'group') {
+        const senderGroupRef = doc(db, 'rooms', roomId, 'groups', txData.senderGroupId);
+        const groupDoc = await getDoc(senderGroupRef);
+        if (groupDoc.exists()) {
+          const currentGroupBal = Number(groupDoc.data().groupBalance || 0);
+          const currentTreasury = Number(groupDoc.data().treasuryCapital || 0);
+          batch.update(senderGroupRef, {
+            groupBalance: currentGroupBal + amount,
+            treasuryCapital: currentTreasury + amount
           });
         }
+      }
 
-        // Refund back to sender
-        if (txData.senderType === 'personal') {
-          const senderUserRef = doc(db, 'rooms', roomId, 'users', String(txData.senderId));
-          const userDoc = await transaction.get(senderUserRef);
-          if (userDoc.exists()) {
-            const currentPersonal = Number(userDoc.data().personalBalance || 0);
-            transaction.update(senderUserRef, { personalBalance: currentPersonal + amount });
-          }
-        } else if (txData.senderType === 'group') {
-          const senderGroupRef = doc(db, 'rooms', roomId, 'groups', txData.senderGroupId);
-          const groupDoc = await transaction.get(senderGroupRef);
-          if (groupDoc.exists()) {
-            const currentGroupBal = Number(groupDoc.data().groupBalance || 0);
-            const currentTreasury = Number(groupDoc.data().treasuryCapital || 0);
-            transaction.update(senderGroupRef, {
-              groupBalance: currentGroupBal + amount,
-              treasuryCapital: currentTreasury + amount
-            });
-          }
-        }
-
-        // Mark transaction revoked
-        transaction.update(txRef, {
-          status: 'revoked',
-          revokedAt: serverTimestamp()
-        });
+      // Mark transaction revoked
+      batch.update(txRef, {
+        status: 'revoked',
+        revokedAt: serverTimestamp()
       });
+
+      await batch.commit();
 
       showToast(`Investment revoked successfully! Funds refunded to wallet.`, 'success');
     } catch (err) {
